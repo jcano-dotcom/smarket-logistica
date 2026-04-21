@@ -766,12 +766,275 @@ def sidebar_config():
 # ══════════════════════════════════════════════════════════
 # MAIN
 # ══════════════════════════════════════════════════════════
+def _render_widget_drag_and_drop(rutas):
+    """
+    Renderiza un widget HTML con drag & drop real para reasignar pedidos entre rutas.
+    Cuando el usuario suelta un pedido en otra ruta, se envía un query param
+    que Streamlit recoge y rerun automáticamente.
+    """
+    import streamlit.components.v1 as components
+    import html as html_mod
+
+    # Serializar las rutas a JSON para el HTML
+    rutas_js = []
+    for i, r in enumerate(rutas):
+        peds_js = []
+        for p in r["peds"]:
+            peds_js.append({
+                "id":      str(p["id"]),
+                "dir":     str(p["direccion"]),
+                "cli":     str(p["cliente"]),
+                "zona":    str(p["zona"]),
+                "cp":      int(p["cp"]),
+                "kg":      float(p["kilos"]),
+                "btos":    int(p["bultos"]),
+                "val":     float(p["valor"]),
+                "imp":     float(p["imp_ped"]),
+            })
+        rutas_js.append({
+            "idx":        i,
+            "nombre":     f"R{i+1}",
+            "transp":     str(r["transportista"]),
+            "zona":       str(r["zona"]),
+            "veh":        str(r["vehiculo"]).replace("Greco - ", ""),
+            "cap_kg":     float(r["cap_kg"]),
+            "kg_total":   float(r["kg_total"]),
+            "val_total":  float(r["val_total"]),
+            "flete":      float(r["flete"]),
+            "impacto":    float(r["impacto"]),
+            "pct_carga":  float(r["pct_carga"]),
+            "n_paradas":  int(r["n_paradas"]),
+            "ayudante":   bool(r["ayudante"]),
+            "peds":       peds_js,
+        })
+
+    rutas_json = json.dumps(rutas_js, ensure_ascii=False)
+
+    # Altura del widget: depende de la cantidad de rutas
+    n_rutas = len(rutas)
+    height  = max(500, 250 + 100 * max(r["n_paradas"] for r in rutas))
+
+    html = """
+<!DOCTYPE html>
+<html>
+<head>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, sans-serif; }
+  body { background: transparent; }
+  .panel { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 12px; }
+  .ruta {
+    border: 1px solid #e5e7eb;
+    border-radius: 12px;
+    background: #fff;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    min-height: 160px;
+  }
+  .ruta.drag-over { border: 2px solid #2563eb; background: #eff6ff; }
+  .ruta-head {
+    padding: 10px 14px;
+    background: #f9fafb;
+    border-bottom: 1px solid #e5e7eb;
+  }
+  .ruta-title { font-size: 14px; font-weight: 600; color: #111; }
+  .ruta-sub   { font-size: 11px; color: #6b7280; margin-top: 2px; }
+  .badge {
+    display: inline-block; padding: 2px 8px; border-radius: 99px;
+    font-size: 10px; font-weight: 600; margin-left: 4px;
+  }
+  .b-green  { background:#dcfce7; color:#166534; }
+  .b-yellow { background:#fef9c3; color:#854d0e; }
+  .b-red    { background:#fee2e2; color:#991b1b; }
+  .b-blue   { background:#dbeafe; color:#1e40af; }
+  .b-gray   { background:#f3f4f6; color:#374151; }
+  .stats {
+    display: flex; flex-wrap: wrap; gap: 10px;
+    font-size: 11px; color: #6b7280; margin-top: 6px;
+  }
+  .stats b { color: #111; }
+  .bar { height: 4px; background: #e5e7eb; border-radius: 2px; margin-top: 6px; overflow: hidden; }
+  .bar > div { height: 100%; border-radius: 2px; transition: width .3s; }
+  .peds-zone {
+    flex: 1; padding: 8px;
+    min-height: 80px;
+    display: flex; flex-direction: column; gap: 6px;
+  }
+  .ped {
+    background: #fafafa;
+    border: 1px solid #e5e7eb;
+    border-radius: 8px;
+    padding: 10px 12px;
+    cursor: grab;
+    user-select: none;
+    transition: box-shadow .15s;
+  }
+  .ped:active { cursor: grabbing; }
+  .ped:hover { box-shadow: 0 2px 6px rgba(0,0,0,.08); border-color: #9ca3af; }
+  .ped.dragging { opacity: 0.3; }
+  .ped-dir { font-size: 15px; font-weight: 600; color: #111; line-height: 1.3; }
+  .ped-cli { font-size: 11px; color: #6b7280; margin-top: 2px; }
+  .ped-stats {
+    display: flex; justify-content: space-between; margin-top: 6px;
+    font-size: 11px;
+  }
+  .ped-kg { font-weight: 500; }
+  .ped-val { color: #6b7280; }
+  .ped-imp { font-weight: 700; }
+  .empty-msg {
+    text-align: center; padding: 20px; color: #9ca3af;
+    font-size: 12px; font-style: italic;
+    border: 2px dashed #e5e7eb; border-radius: 8px;
+  }
+  .drop-target {
+    border: 2px dashed #2563eb;
+    background: #dbeafe;
+  }
+</style>
+</head>
+<body>
+<div id="panel" class="panel"></div>
+
+<script>
+const RUTAS = __RUTAS_JSON__;
+
+function impColor(v) {
+  if (v <= 3) return {cls: "b-green", col: "#16a34a"};
+  if (v <= 5) return {cls: "b-yellow", col: "#d97706"};
+  return {cls: "b-red", col: "#dc2626"};
+}
+function cargaColor(p) {
+  if (p >= 75) return "#16a34a";
+  if (p >= 45) return "#d97706";
+  return "#dc2626";
+}
+function fmt(n) { return Math.round(n).toLocaleString("es-AR"); }
+
+function render() {
+  const panel = document.getElementById("panel");
+  panel.innerHTML = "";
+
+  RUTAS.forEach((r, ri) => {
+    const imp = impColor(r.impacto);
+    const cc  = cargaColor(r.pct_carga);
+    const ay  = r.ayudante ? '<span class="badge b-yellow">+ Ay.</span>' : '';
+
+    const ruta = document.createElement("div");
+    ruta.className = "ruta";
+    ruta.dataset.idx = ri;
+
+    ruta.innerHTML = `
+      <div class="ruta-head">
+        <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:4px">
+          <div>
+            <span class="ruta-title">${r.transp}</span>
+            <span class="badge b-blue">${r.zona}</span>
+            <span class="badge b-gray">${r.veh}</span>
+            ${ay}
+          </div>
+          <span class="badge ${imp.cls}" style="font-size:13px">${r.impacto.toFixed(2)}%</span>
+        </div>
+        <div class="stats">
+          <span>${r.n_paradas} par.</span>
+          <span><b>${fmt(r.kg_total)} kg</b> / ${fmt(r.cap_kg)} kg</span>
+          <span style="color:${cc};font-weight:600">${r.pct_carga.toFixed(0)}% carga</span>
+          <span>Flete <b>$${fmt(r.flete)}</b></span>
+          <span>Merc. <b>$${fmt(r.val_total)}</b></span>
+        </div>
+        <div class="bar"><div style="width:${Math.min(r.pct_carga,100)}%;background:${cc}"></div></div>
+        <div class="bar" style="margin-top:3px"><div style="width:${Math.min(r.impacto/8*100,100)}%;background:${imp.col}"></div></div>
+      </div>
+      <div class="peds-zone" id="zone-${ri}" data-idx="${ri}"></div>
+    `;
+
+    const zone = ruta.querySelector(".peds-zone");
+
+    if (r.peds.length === 0) {
+      zone.innerHTML = '<div class="empty-msg">Soltá pedidos acá</div>';
+    } else {
+      r.peds.forEach(p => {
+        const im = impColor(p.imp);
+        const ped = document.createElement("div");
+        ped.className = "ped";
+        ped.draggable = true;
+        ped.dataset.pid = p.id;
+        ped.dataset.fromRuta = ri;
+        ped.innerHTML = `
+          <div class="ped-dir">${p.dir}</div>
+          <div class="ped-cli">${p.cli} · #${p.id} · CP ${p.cp} · ${p.zona}</div>
+          <div class="ped-stats">
+            <span class="ped-kg">${p.kg.toFixed(0)} kg · ${p.btos} btos</span>
+            <span class="ped-val">$${fmt(p.val)}</span>
+            <span class="ped-imp" style="color:${im.col}">${p.imp.toFixed(2)}%</span>
+          </div>
+        `;
+        ped.addEventListener("dragstart", (e) => {
+          e.dataTransfer.setData("pid", p.id);
+          e.dataTransfer.setData("from", ri);
+          ped.classList.add("dragging");
+        });
+        ped.addEventListener("dragend", () => {
+          ped.classList.remove("dragging");
+        });
+        zone.appendChild(ped);
+      });
+    }
+
+    // Drop events en toda la ruta
+    ruta.addEventListener("dragover", (e) => {
+      e.preventDefault();
+      ruta.classList.add("drag-over");
+    });
+    ruta.addEventListener("dragleave", () => {
+      ruta.classList.remove("drag-over");
+    });
+    ruta.addEventListener("drop", (e) => {
+      e.preventDefault();
+      ruta.classList.remove("drag-over");
+      const pid     = e.dataTransfer.getData("pid");
+      const fromIdx = parseInt(e.dataTransfer.getData("from"));
+      const toIdx   = ri;
+      if (fromIdx === toIdx) return;
+      // Enviar la asignación a Streamlit vía query param
+      const url = new URL(window.parent.location.href);
+      url.searchParams.set("move_pid", pid);
+      url.searchParams.set("move_to", toIdx);
+      url.searchParams.set("_t", Date.now());
+      window.parent.location.href = url.toString();
+    });
+
+    panel.appendChild(ruta);
+  });
+}
+
+render();
+</script>
+</body>
+</html>
+"""
+    html = html.replace("__RUTAS_JSON__", rutas_json)
+    components.html(html, height=height, scrolling=True)
+
+
+
 def main():
     # Estado de la sesión
     if "fletes_man"   not in st.session_state: st.session_state["fletes_man"]   = {}
     if "horas_man"    not in st.session_state: st.session_state["horas_man"]    = {}
     if "asign_man"    not in st.session_state: st.session_state["asign_man"]    = {}
     if "rutas_extra"  not in st.session_state: st.session_state["rutas_extra"]  = []
+
+    # Capturar query params del widget drag & drop
+    qp = st.query_params
+    if "move_pid" in qp and "move_to" in qp:
+        try:
+            pid = str(qp["move_pid"])
+            to  = int(qp["move_to"])
+            st.session_state["asign_man"][pid] = to
+        except Exception:
+            pass
+        # Limpiar query params
+        st.query_params.clear()
 
     pedidos_df, trans_df = sidebar_config()
 
@@ -795,14 +1058,14 @@ def main():
         "⚙️ Fletes", "⬇️ Exportar Excel", "🔗 Google Sheets",
     ])
 
-    # ── PANEL INTERACTIVO ─────────────────────────────────
+        # ── PANEL INTERACTIVO (widget HTML con drag & drop) ──
     with tab_panel:
         tc  = sum(r["flete"]     for r in rutas)
         tv  = sum(r["val_total"] for r in rutas)
         tkg = sum(r["kg_total"]  for r in rutas)
         ig  = tc / tv * 100 if tv > 0 else 0
 
-        # ── KPIs ──────────────────────────────────────────
+        # KPIs
         c1,c2,c3,c4,c5 = st.columns(5)
         c1.metric("Rutas activas", len(rutas))
         c2.metric("Pedidos",       sum(r["n_paradas"] for r in rutas))
@@ -811,105 +1074,55 @@ def main():
         c5.metric("Impacto global",f"{ig:.2f}%",
                   delta=f"{ig-3:.2f}% vs 3%", delta_color="inverse")
 
-        # ── Acciones globales ─────────────────────────────
-        col_act1, col_act2, col_act3 = st.columns([1,1,3])
-        with col_act1:
+        # Acciones globales
+        col_a1, col_a2, _ = st.columns([1.2, 1.2, 3])
+        with col_a1:
             if st.button("➕ Agregar nuevo flete", use_container_width=True):
-                # Agregar un índice nuevo que no exista todavía
-                nuevo_idx = len(rutas)
-                st.session_state["rutas_extra"].append(nuevo_idx)
+                st.session_state["rutas_extra"].append(len(rutas))
                 st.rerun()
-        with col_act2:
-            if st.button("🔄 Resetear asignación", use_container_width=True,
-                         help="Vuelve a la asignación automática"):
-                st.session_state["asign_man"] = {}
+        with col_a2:
+            if st.button("🔄 Resetear asignación", use_container_width=True):
+                st.session_state["asign_man"]   = {}
                 st.session_state["rutas_extra"] = []
-                st.session_state["fletes_man"] = {}
+                st.session_state["fletes_man"]  = {}
                 st.rerun()
 
         st.markdown("---")
+        if rutas:
+            criticas = [r for r in rutas if r["impacto"] > 3]
+            if criticas:
+                st.warning(f"⚠️ {len(criticas)} ruta(s) superan el 3% de impacto.")
+            else:
+                st.success("✅ Todas las rutas están por debajo del 3%.")
 
-        if not rutas:
+            # ── Widget interactivo con drag & drop ────────
+            _render_widget_drag_and_drop(rutas)
+
+            # ── Editor de flete por ruta ──────────────────
+            st.markdown("#### 💰 Editar flete por ruta")
+            cols_flete = st.columns(max(1, len(rutas)))
+            for i, r in enumerate(rutas):
+                with cols_flete[i % len(cols_flete)]:
+                    fn = st.number_input(
+                        f"R{i+1} · {r['transportista']} ({r['zona'][:20]})",
+                        min_value=0,
+                        value=int(r["flete"]),
+                        step=1000,
+                        key=f"fl_p_{r['id']}_{i}",
+                        help=f"Auto: ${r['flete_auto']:,.0f}",
+                    )
+                    if fn != int(r["flete_auto"]):
+                        st.session_state["fletes_man"][r["id"]] = fn
+                    elif r["id"] in st.session_state["fletes_man"]:
+                        del st.session_state["fletes_man"][r["id"]]
+                    ip = fn / r["val_total"] * 100 if r["val_total"] > 0 else 0
+                    color = "#16a34a" if ip <= 3 else "#d97706" if ip <= 5 else "#dc2626"
+                    st.markdown(
+                        f'<div style="margin-top:-8px;font-size:13px;color:{color};font-weight:600">Impacto: {ip:.2f}%</div>',
+                        unsafe_allow_html=True,
+                    )
+        else:
             st.info("No hay rutas generadas.")
-            return
-
-        criticas = [r for r in rutas if r["impacto"] > 3]
-        if criticas:
-            st.warning(f"⚠️ {len(criticas)} ruta(s) superan el 3% de impacto.")
-        else:
-            st.success("✅ Todas las rutas están por debajo del 3%.")
-
-        # ── Opciones para el selector de movimiento ───────
-        ruta_labels = [f"R{i+1} · {r['transportista']} — {r['zona']}" for i, r in enumerate(rutas)]
-
-        # ── Render tarjetas interactivas ──────────────────
-        n = len(rutas)
-        if n == 1:
-            cols_iter = [[0]]
-        else:
-            cols_iter = [list(range(i, min(i+2, n))) for i in range(0, n, 2)]
-
-        for fila_idxs in cols_iter:
-            cols = st.columns(len(fila_idxs))
-            for col, idx in zip(cols, fila_idxs):
-                with col:
-                    r = rutas[idx]
-                    _render_ruta_interactiva(r, idx, ruta_labels, rutas)
-
-
-def _render_ruta_interactiva(r, idx, ruta_labels, rutas):
-    """Renderiza una ruta con tarjetas de pedidos interactivas."""
-    # Encabezado HTML
-    st.markdown(render_ruta_header_html(r), unsafe_allow_html=True)
-
-    # ── Flete editable ────────────────────────────────────
-    col_f1, col_f2 = st.columns([2, 1])
-    with col_f1:
-        flete_nuevo = st.number_input(
-            f"💰 Flete (R{idx+1})",
-            min_value=0,
-            value=int(r["flete"]),
-            step=1000,
-            key=f"fl_panel_{r['id']}_{idx}",
-            help=f"Automático: ${r['flete_auto']:,.0f}",
-        )
-    with col_f2:
-        imp_nuevo = flete_nuevo / r["val_total"] * 100 if r["val_total"] > 0 else 0
-        color = "#16a34a" if imp_nuevo <= 3 else "#d97706" if imp_nuevo <= 5 else "#dc2626"
-        st.markdown(
-            f'<div style="padding-top:28px;text-align:right;font-size:20px;font-weight:600;color:{color}">{imp_nuevo:.2f}%</div>',
-            unsafe_allow_html=True,
-        )
-
-    # Guardar el flete editado
-    if flete_nuevo != int(r["flete_auto"]):
-        st.session_state["fletes_man"][r["id"]] = flete_nuevo
-    elif r["id"] in st.session_state["fletes_man"]:
-        del st.session_state["fletes_man"][r["id"]]
-
-    # ── Lista de pedidos con selector de movimiento ───────
-    if not r["peds"]:
-        st.info("Esta ruta está vacía. Asigná pedidos desde otras rutas.")
-    else:
-        with st.expander(f"Ver {r['n_paradas']} pedidos", expanded=True):
-            for p in r["peds"]:
-                st.markdown(render_pedido_card_html(p), unsafe_allow_html=True)
-
-                # Selector para mover el pedido a otra ruta
-                opciones = ["— Mantener acá —"] + [lbl for i, lbl in enumerate(ruta_labels) if i != idx]
-                destino = st.selectbox(
-                    f"Mover #{p['id']} →",
-                    opciones,
-                    key=f"mv_{p['id']}_{idx}",
-                    label_visibility="collapsed",
-                )
-                if destino != "— Mantener acá —":
-                    # Encontrar el índice destino
-                    destino_idx = ruta_labels.index(destino)
-                    st.session_state["asign_man"][str(p["id"])] = destino_idx
-                    st.rerun()
-
-    st.markdown("<br>", unsafe_allow_html=True)
 
     # ── PEDIDOS ───────────────────────────────────────────
     with tab_peds:

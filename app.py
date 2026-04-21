@@ -424,7 +424,9 @@ def _consolidar_zonas(pedidos_df, transportes_df):
 def optimizar_rutas(pedidos_df, transportes_df, fletes_man, horas_man, asign_man=None, rutas_extra=None):
     """
     asign_man  : dict {pedido_id: ruta_idx} — asignaciones manuales de pedidos a rutas
-    rutas_extra: list de int — índices de rutas adicionales vacías creadas por el usuario
+    rutas_extra: list — rutas extra vacías. Cada elemento puede ser:
+                 - int (índice de ruta, usa transportista default), o
+                 - dict {"idx": int, "transportista": str} (con transportista específico)
     """
     # ── Guard: validar entrada ────────────────────────────
     if pedidos_df is None or not isinstance(pedidos_df, pd.DataFrame) or pedidos_df.empty:
@@ -457,37 +459,59 @@ def optimizar_rutas(pedidos_df, transportes_df, fletes_man, horas_man, asign_man
         peds_sin_asignar = pedidos_df[~pedidos_df["id"].astype(str).isin(pedidos_asignados)]
         auto_grupos = _consolidar_zonas(peds_sin_asignar, transportes_df) if not peds_sin_asignar.empty else []
 
-        # Agregar rutas extra vacías
-        for ridx in rutas_extra:
+        # Agregar rutas extra vacías (pueden ser int o dict)
+        extras_trans = {}  # {ridx: transportista}
+        for extra in rutas_extra:
+            if isinstance(extra, dict):
+                ridx = extra["idx"]
+                extras_trans[ridx] = extra.get("transportista")
+            else:
+                ridx = extra
             grupos_dict.setdefault(ridx, [])
 
-        # Convertir a formato lista de (nombre, df)
+        # Convertir a formato lista de (nombre, df, trans_preferido)
         grupos = []
-        # Primero rutas manuales (ordenadas por índice)
         for ridx in sorted(grupos_dict.keys()):
             peds_list = grupos_dict[ridx]
+            trans_pref = extras_trans.get(ridx)
             if peds_list:
                 df_ruta = pd.DataFrame(peds_list)
                 zonas_ruta = df_ruta["zona"].unique()
                 nombre = " + ".join(sorted(set(zonas_ruta))) if len(zonas_ruta) > 1 else zonas_ruta[0]
-                grupos.append((f"R{ridx+1} · {nombre}", df_ruta))
+                grupos.append((f"R{ridx+1} · {nombre}", df_ruta, trans_pref))
             else:
-                # Ruta vacía agregada manualmente
-                grupos.append((f"R{ridx+1} · (vacía)", pd.DataFrame(columns=pedidos_df.columns)))
+                grupos.append((f"R{ridx+1} · (vacía)", pd.DataFrame(columns=pedidos_df.columns), trans_pref))
         # Luego rutas automáticas del resto
         grupos.extend(auto_grupos)
     else:
-        grupos = _consolidar_zonas(pedidos_df, transportes_df)
-        # Agregar rutas extra vacías
-        for ridx in rutas_extra:
-            grupos.append((f"R{ridx+1} · (vacía)", pd.DataFrame(columns=pedidos_df.columns)))
+        grupos_base = _consolidar_zonas(pedidos_df, transportes_df)
+        grupos = [(n, df, None) for (n, df) in grupos_base]
+        # Agregar rutas extra vacías (pueden ser int o dict)
+        for extra in rutas_extra:
+            if isinstance(extra, dict):
+                ridx = extra["idx"]
+                trans_pref = extra.get("transportista")
+            else:
+                ridx = extra
+                trans_pref = None
+            grupos.append((f"R{ridx+1} · (vacía)", pd.DataFrame(columns=pedidos_df.columns), trans_pref))
+
+    # Auto-extend: el bloque anterior dejó grupos como tuplas de 2 si venía del caso asign_man
+    # (ya lo arreglamos ahí), o como tuplas de 3 si viene del else. Todo uniforme en tuplas de 3.
+    # Si alguna tupla de 2 quedara, la convertimos:
+    grupos = [g if len(g) == 3 else (g[0], g[1], None) for g in grupos]
 
     rutas  = []
 
-    for nombre_zona, grp_df in grupos:
+    for nombre_zona, grp_df, trans_pref in grupos:
         # Ruta vacía (agregada manualmente sin pedidos aún)
         if grp_df.empty:
-            trans_row = transportes_df.iloc[0]  # default: primer transportista
+            # Si hay transportista preferido, usarlo; sino el primero
+            if trans_pref:
+                m = transportes_df[transportes_df["nombre"] == trans_pref]
+                trans_row = m.iloc[0] if not m.empty else transportes_df.iloc[0]
+            else:
+                trans_row = transportes_df.iloc[0]
             cap_kg    = float(trans_row["capacidad_kg"])
             tarifa    = float(trans_row["costo_hora"])
             fijo      = float(trans_row.get("costo_fijo", 0))
@@ -510,7 +534,12 @@ def optimizar_rutas(pedidos_df, transportes_df, fletes_man, horas_man, asign_man
 
         kg_grp     = grp_df["kilos"].sum()
         prima_zona = grp_df["zona"].iloc[0]
-        trans_row  = _elegir_transportista(kg_grp, prima_zona, transportes_df)
+        # Si hay transportista preferido (ruta extra con pedidos), usarlo
+        if trans_pref:
+            m = transportes_df[transportes_df["nombre"] == trans_pref]
+            trans_row = m.iloc[0] if not m.empty else _elegir_transportista(kg_grp, prima_zona, transportes_df)
+        else:
+            trans_row = _elegir_transportista(kg_grp, prima_zona, transportes_df)
         cap_kg     = float(trans_row["capacidad_kg"])
         tarifa     = float(trans_row["costo_hora"])
         fijo       = float(trans_row.get("costo_fijo", 0))
@@ -1060,45 +1089,10 @@ def main():
 
         # ── PANEL INTERACTIVO (widget HTML con drag & drop) ──
     with tab_panel:
-        tc  = sum(r["flete"]     for r in rutas)
-        tv  = sum(r["val_total"] for r in rutas)
-        tkg = sum(r["kg_total"]  for r in rutas)
-        ig  = tc / tv * 100 if tv > 0 else 0
-
-        # KPIs
-        c1,c2,c3,c4,c5 = st.columns(5)
-        c1.metric("Rutas activas", len(rutas))
-        c2.metric("Pedidos",       sum(r["n_paradas"] for r in rutas))
-        c3.metric("Kg total",      f"{tkg:,.0f}")
-        c4.metric("Costo flete",   f"${tc:,.0f}")
-        c5.metric("Impacto global",f"{ig:.2f}%",
-                  delta=f"{ig-3:.2f}% vs 3%", delta_color="inverse")
-
-        # Acciones globales
-        col_a1, col_a2, _ = st.columns([1.2, 1.2, 3])
-        with col_a1:
-            if st.button("➕ Agregar nuevo flete", use_container_width=True):
-                st.session_state["rutas_extra"].append(len(rutas))
-                st.rerun()
-        with col_a2:
-            if st.button("🔄 Resetear asignación", use_container_width=True):
-                st.session_state["asign_man"]   = {}
-                st.session_state["rutas_extra"] = []
-                st.session_state["fletes_man"]  = {}
-                st.rerun()
-
-        st.markdown("---")
+        # ── PASO 1: Capturar ediciones de flete ANTES de mostrar el widget ──
+        # Esto garantiza que cuando el usuario edita un flete,
+        # el widget de arriba se rerenderiza con el valor actualizado.
         if rutas:
-            criticas = [r for r in rutas if r["impacto"] > 3]
-            if criticas:
-                st.warning(f"⚠️ {len(criticas)} ruta(s) superan el 3% de impacto.")
-            else:
-                st.success("✅ Todas las rutas están por debajo del 3%.")
-
-            # ── Widget interactivo con drag & drop ────────
-            _render_widget_drag_and_drop(rutas)
-
-            # ── Editor de flete por ruta ──────────────────
             st.markdown("#### 💰 Editar flete por ruta")
             cols_flete = st.columns(max(1, len(rutas)))
             for i, r in enumerate(rutas):
@@ -1111,16 +1105,84 @@ def main():
                         key=f"fl_p_{r['id']}_{i}",
                         help=f"Auto: ${r['flete_auto']:,.0f}",
                     )
+                    # Persistir override en session_state
                     if fn != int(r["flete_auto"]):
                         st.session_state["fletes_man"][r["id"]] = fn
                     elif r["id"] in st.session_state["fletes_man"]:
                         del st.session_state["fletes_man"][r["id"]]
-                    ip = fn / r["val_total"] * 100 if r["val_total"] > 0 else 0
+                    # Actualizar el objeto ruta en memoria (para que el widget lo vea)
+                    r["flete"] = fn
+                    r["impacto"] = fn / r["val_total"] * 100 if r["val_total"] > 0 else 0
+                    # Recalcular impacto por pedido
+                    for p in r["peds"]:
+                        if r["kg_total"] > 0:
+                            p["flete_ped"] = fn * p["kilos"] / r["kg_total"]
+                            p["imp_ped"]   = (fn * p["kilos"] / r["kg_total"]) / p["valor"] * 100 if p["valor"] > 0 else 0
+
+                    ip = r["impacto"]
                     color = "#16a34a" if ip <= 3 else "#d97706" if ip <= 5 else "#dc2626"
                     st.markdown(
                         f'<div style="margin-top:-8px;font-size:13px;color:{color};font-weight:600">Impacto: {ip:.2f}%</div>',
                         unsafe_allow_html=True,
                     )
+
+            st.markdown("---")
+
+        # ── PASO 2: KPIs con los valores ya actualizados ─────
+        tc  = sum(r["flete"]     for r in rutas)
+        tv  = sum(r["val_total"] for r in rutas)
+        tkg = sum(r["kg_total"]  for r in rutas)
+        ig  = tc / tv * 100 if tv > 0 else 0
+
+        c1,c2,c3,c4,c5 = st.columns(5)
+        c1.metric("Rutas activas", len(rutas))
+        c2.metric("Pedidos",       sum(r["n_paradas"] for r in rutas))
+        c3.metric("Kg total",      f"{tkg:,.0f}")
+        c4.metric("Costo flete",   f"${tc:,.0f}")
+        c5.metric("Impacto global",f"{ig:.2f}%",
+                  delta=f"{ig-3:.2f}% vs 3%", delta_color="inverse")
+
+        # ── PASO 3: Acciones globales (agregar flete con selector de transportista) ──
+        st.markdown("---")
+        st.markdown("#### ➕ Agregar un nuevo flete manual")
+        col_sel, col_btn, col_reset = st.columns([3, 1, 1])
+        with col_sel:
+            trans_nuevo = st.selectbox(
+                "Elegí transportista para el nuevo flete",
+                options=trans_df["nombre"].tolist(),
+                key="sel_nuevo_trans",
+                label_visibility="collapsed",
+            )
+        with col_btn:
+            if st.button("➕ Agregar", use_container_width=True, type="primary"):
+                nuevo_idx = max([len(rutas)] + [
+                    (e["idx"] if isinstance(e, dict) else e) + 1
+                    for e in st.session_state["rutas_extra"]
+                ] + [0])
+                st.session_state["rutas_extra"].append({
+                    "idx": nuevo_idx,
+                    "transportista": trans_nuevo,
+                })
+                st.rerun()
+        with col_reset:
+            if st.button("🔄 Resetear", use_container_width=True,
+                         help="Vuelve a la asignación automática"):
+                st.session_state["asign_man"]   = {}
+                st.session_state["rutas_extra"] = []
+                st.session_state["fletes_man"]  = {}
+                st.rerun()
+
+        st.markdown("---")
+
+        # ── PASO 4: Widget con drag & drop (ya con fletes actualizados) ──
+        if rutas:
+            criticas = [r for r in rutas if r["impacto"] > 3]
+            if criticas:
+                st.warning(f"⚠️ {len(criticas)} ruta(s) superan el 3% de impacto.")
+            else:
+                st.success("✅ Todas las rutas están por debajo del 3%.")
+
+            _render_widget_drag_and_drop(rutas)
         else:
             st.info("No hay rutas generadas.")
 

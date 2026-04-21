@@ -220,6 +220,19 @@ def optimizar_rutas(
     """
     Devuelve lista de dicts con info completa de cada ruta.
     """
+    # Guardia: DataFrame inválido o sin columna zona
+    if pedidos_df is None or not isinstance(pedidos_df, pd.DataFrame):
+        return []
+    if "zona" not in pedidos_df.columns:
+        st.error(
+            "**Error: No se encontró la columna `zona` en el archivo.**\n\n"
+            "Por favor verificá el nombre de las columnas en tu archivo."
+        )
+        return []
+    if pedidos_df.empty:
+        st.warning("El archivo no contiene pedidos válidos para rutear.")
+        return []
+
     rutas = []
     zonas = pedidos_df["zona"].unique()
 
@@ -335,32 +348,73 @@ def load_from_file(uploaded) -> Optional[pd.DataFrame]:
         st.error(f"Error al leer archivo: {e}")
         return None
 
-def normalizar_columnas(df: pd.DataFrame) -> pd.DataFrame:
-    """Normaliza nombres de columnas al esquema interno."""
-    MAP = {
-        "n° de pedido":"id","pedido":"id","n_pedido":"id",
-        "descripción cliente":"cliente","descripcion cliente":"cliente","descripcion_cliente":"cliente",
-        "dirección de entrega":"direccion","direccion de entrega":"direccion","direccion_entrega":"direccion",
-        "localidad de entrega":"zona","localidad":"zona","barrio/expreso":"zona",
-        "codigo postal":"cp","código postal":"cp","cp":"cp",
-        "kilos":"kilos","peso":"kilos","peso kg":"kilos",
-        "valor":"valor","importe del pedido":"valor","valor venta":"valor",
-        "bultos":"bultos",
-    }
+def normalizar_columnas(df: pd.DataFrame) -> Optional[pd.DataFrame]:
+    """
+    Normaliza nombres de columnas al esquema interno.
+    Paso 1: convierte todas las columnas a minusculas.
+    Paso 2: renombra variantes conocidas al nombre interno.
+    Paso 3: valida que exista la columna critica "zona" y muestra error amigable si no.
+    """
+    # Paso 1 — minusculas y sin espacios extremos
     df.columns = [c.strip().lower() for c in df.columns]
-    df = df.rename(columns={k:v for k,v in MAP.items() if k in df.columns})
-    for col, default in [("cp",0),("kilos",0),("valor",0),("bultos",0)]:
+
+    # Paso 2 — mapa ampliado de sinonimos
+    MAP = {
+        "n° de pedido": "id", "n° pedido": "id", "nro pedido": "id",
+        "pedido": "id", "n_pedido": "id", "id pedido": "id",
+        "descripcion cliente": "cliente", "descripción cliente": "cliente",
+        "descripcion_cliente": "cliente", "nombre cliente": "cliente",
+        "razon social": "cliente",
+        "direccion de entrega": "direccion", "dirección de entrega": "direccion",
+        "direccion_entrega": "direccion", "dirección": "direccion",
+        "domicilio": "direccion",
+        "zona": "zona", "localidad": "zona", "localidad de entrega": "zona",
+        "barrio/expreso": "zona", "barrio": "zona", "ciudad": "zona",
+        "region": "zona", "región": "zona", "partido": "zona",
+        "cp": "cp", "codigo postal": "cp", "código postal": "cp",
+        "cod postal": "cp", "cod. postal": "cp",
+        "kilos": "kilos", "kg": "kilos", "peso": "kilos",
+        "peso kg": "kilos", "peso (kg)": "kilos",
+        "valor": "valor", "importe del pedido": "valor",
+        "valor venta": "valor", "importe": "valor", "monto": "valor",
+        "bultos": "bultos", "cajas": "bultos", "cant. bultos": "bultos",
+    }
+    df = df.rename(columns={k: v for k, v in MAP.items() if k in df.columns})
+
+    # Paso 3 — validar columna critica "zona"
+    if "zona" not in df.columns:
+        cols = ", ".join(f"'{c}'" for c in df.columns.tolist())
+        st.error(
+            "**Error: No se encontró la columna `zona` en el archivo.**\n\n"
+            "Verificá que tu archivo tenga una columna con alguno de estos nombres: "
+            "`zona`, `localidad`, `localidad de entrega`, `barrio`, `ciudad`, `región`.\n\n"
+            f"Columnas encontradas en tu archivo: {cols}"
+        )
+        return None
+
+    # Paso 4 — columnas numericas opcionales
+    for col, default in [("cp", 0), ("kilos", 0), ("valor", 0), ("bultos", 0)]:
         if col not in df.columns:
             df[col] = default
-    for col in ("id","cliente","direccion","zona"):
+
+    # Paso 5 — columnas de texto opcionales
+    for col in ("id", "cliente", "direccion"):
         if col not in df.columns:
             df[col] = ""
+
+    # Paso 6 — parseo numerico seguro
     df["kilos"] = pd.to_numeric(df["kilos"], errors="coerce").fillna(0)
     df["valor"] = pd.to_numeric(df["valor"], errors="coerce").fillna(0)
     df["cp"]    = pd.to_numeric(df["cp"],    errors="coerce").fillna(0).astype(int)
-    # Filtrar depósito
+
+    # Paso 7 — filtrar pedidos de deposito
     df = df[~df["direccion"].str.lower().str.contains("maestro santana|beccar", na=False)]
     df = df[df["kilos"] > 0]
+
+    if df.empty:
+        st.warning("No quedaron pedidos luego del filtro. Verificá que haya filas con kilos > 0.")
+        return None
+
     return df.reset_index(drop=True)
 
 def load_from_gsheet(url_or_id: str, creds_json: Optional[str] = None) -> Optional[pd.DataFrame]:
@@ -490,7 +544,7 @@ def sidebar_config():
             )
             if uploaded:
                 pedidos_df = load_from_file(uploaded)
-                if pedidos_df is not None:
+                if pedidos_df is not None and not pedidos_df.empty:
                     st.success(f"✓ {len(pedidos_df)} pedidos cargados")
 
         elif fuente == "Google Sheets":
@@ -564,8 +618,9 @@ def main():
     ])
 
     # ── Optimizar ──────────────────────────────────────────
+    # pedidos_df puede ser None si normalizar_columnas falló
     rutas = optimizar_rutas(
-        pedidos_df,
+        pedidos_df if pedidos_df is not None else pd.DataFrame(),
         transportes_df,
         st.session_state["fletes_manuales"],
         st.session_state["horas_estimadas"],

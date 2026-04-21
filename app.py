@@ -449,53 +449,93 @@ def render_ruta_card(r):
     imp   = r["impacto"]
     pct_c = r["pct_carga"]
     cc    = carga_col(pct_c)
-    ay    = f"<span class=\'badge badge-yellow\'>+ Ayudante</span>" if r["ayudante"] else ""
 
-    peds_html = ""
+    # ── ayudante badge ────────────────────────────────────
+    ay = '<span class="badge badge-yellow">+ Ayudante</span>' if r["ayudante"] else ""
+
+    # ── filas de pedidos ──────────────────────────────────
+    peds_partes = []
     for p in r["peds"]:
         cls = ic_row(p["imp_ped"])
-        peds_html += f"""
-        <div class=\'ped-row\'>
-          <div style=\'flex:1\'>
-            <div style=\'font-weight:500\'>{p["direccion"]}</div>
-            <div style=\'color:#6b7280;font-size:11px\'>{p["cliente"]} · #{p["id"]} · CP {p["cp"]}</div>
-          </div>
-          <div style=\'text-align:right;flex-shrink:0;padding-left:8px\'>
-            <div style=\'font-size:12px;font-weight:500\'>{p["kilos"]:.0f} kg · {p["bultos"]} btos</div>
-            <div style=\'color:#6b7280;font-size:11px\'>${p["valor"]:,.0f}</div>
-            <div class=\'{cls}\'>{p["imp_ped"]:.2f}%</div>
-          </div>
-        </div>"""
+        peds_partes.append(
+            '<div class="ped-row">'
+            '<div style="flex:1">'
+            '<div style="font-weight:500">' + str(p["direccion"]) + '</div>'
+            '<div style="color:#6b7280;font-size:11px">'
+                + str(p["cliente"]) + " · #" + str(p["id"]) + " · CP " + str(p["cp"]) +
+            '</div>'
+            '</div>'
+            '<div style="text-align:right;flex-shrink:0;padding-left:8px">'
+            '<div style="font-size:12px;font-weight:500">'
+                + f'{p["kilos"]:.0f}' + " kg · " + str(p["bultos"]) + " btos"
+            + '</div>'
+            '<div style="color:#6b7280;font-size:11px">$' + f'{p["valor"]:,.0f}' + '</div>'
+            '<div class="' + cls + '">' + f'{p["imp_ped"]:.2f}' + '%</div>'
+            '</div>'
+            '</div>'
+        )
+    peds_html = "".join(peds_partes)
 
+    # ── alerta impacto ────────────────────────────────────
     merc_min = r["flete"] / 0.03 if r["flete"] > 0 else 0
-    alerta   = f"<div style=\'font-size:11px;color:#dc2626\'>Para llegar al 3% necesitás ${merc_min:,.0f} de mercadería</div>" if imp > 3 else ""
+    alerta = (
+        '<div style="font-size:11px;color:#dc2626;margin-bottom:6px">'
+        'Para llegar al 3% necesitás $' + f'{merc_min:,.0f}' + ' de mercadería</div>'
+    ) if imp > 3 else ""
 
-    st.markdown(f"""
-    <div class=\'ruta-card\'>
-      <div class=\'ruta-header\'>
-        <div>
-          <span class=\'ruta-title\'>{r["transportista"]}</span>
-          <span class=\'badge badge-blue\' style=\'margin-left:8px\'>{r["zona"]}</span>
-          <span class=\'badge badge-gray\' style=\'margin-left:4px\'>{r["vehiculo"].replace("Greco - ","")}</span>
-          {ay}
-        </div>
-        <span class=\'badge {ic_badge(imp)}\' style=\'font-size:13px\'>{imp:.2f}%</span>
-      </div>
-      <div class=\'stat-row\'>
-        <span>{r["n_paradas"]} paradas</span>
-        <span><span class=\'stat-val\'>{r["kg_total"]:.0f} kg</span> / {r["cap_kg"]:.0f} kg</span>
-        <span><span class=\'stat-val\' style=\'color:{cc}\'>{pct_c:.0f}% carga</span></span>
-        <span>{r["horas"]:.1f}h</span>
-        <span>Flete <span class=\'stat-val\'>${r["flete"]:,.0f}</span></span>
-        <span>Merc. <span class=\'stat-val\'>${r["val_total"]:,.0f}</span></span>
-      </div>
-      <div class=\'progress-wrap\'><div class=\'progress-fill\' style=\'width:{min(pct_c,100):.0f}%;background:{cc}\'></div></div>
-      <div class=\'progress-wrap\' style=\'margin-top:4px\'><div class=\'progress-fill\' style=\'width:{min(imp/8*100,100):.0f}%;background:{"#16a34a" if imp<=3 else "#d97706" if imp<=5 else "#dc2626"}\'></div></div>
-      <div style=\'display:flex;justify-content:space-between;font-size:9px;color:#9ca3af;margin-bottom:6px\'><span>impacto</span><span>objetivo 3%</span><span>8%</span></div>
-      {alerta}
-      <details><summary style=\'cursor:pointer;font-size:12px;color:#6b7280;margin-top:4px\'>Ver {r["n_paradas"]} pedidos ▾</summary>
-      {peds_html}</details>
-    </div>""", unsafe_allow_html=True)
+    # ── color barra de impacto ────────────────────────────
+    imp_color = "#16a34a" if imp <= 3 else "#d97706" if imp <= 5 else "#dc2626"
+    imp_w     = min(imp / 8 * 100, 100)
+    carga_w   = min(pct_c, 100)
+
+    # ── HTML de la tarjeta (sin f-string para evitar escaping de comillas) ──
+    html = (
+        '<div class="ruta-card">'
+        '<div class="ruta-header">'
+        '<div>'
+        '<span class="ruta-title">' + str(r["transportista"]) + '</span>'
+        '<span class="badge badge-blue" style="margin-left:8px">' + str(r["zona"]) + '</span>'
+        '<span class="badge badge-gray" style="margin-left:4px">'
+            + str(r["vehiculo"]).replace("Greco - ", "") + '</span>'
+        + ay +
+        '</div>'
+        '<span class="badge ' + ic_badge(imp) + '" style="font-size:13px">'
+            + f'{imp:.2f}' + '%</span>'
+        '</div>'
+
+        '<div class="stat-row">'
+        '<span>' + str(r["n_paradas"]) + ' paradas</span>'
+        '<span><span class="stat-val">' + f'{r["kg_total"]:.0f}' + ' kg</span> / '
+            + f'{r["cap_kg"]:.0f}' + ' kg</span>'
+        '<span><span class="stat-val" style="color:' + cc + '">'
+            + f'{pct_c:.0f}' + '% carga</span></span>'
+        '<span>' + f'{r["horas"]:.1f}' + 'h</span>'
+        '<span>Flete <span class="stat-val">$' + f'{r["flete"]:,.0f}' + '</span></span>'
+        '<span>Merc. <span class="stat-val">$' + f'{r["val_total"]:,.0f}' + '</span></span>'
+        '</div>'
+
+        '<div class="progress-wrap">'
+        '<div class="progress-fill" style="width:' + f'{carga_w:.0f}' + '%;background:' + cc + '"></div>'
+        '</div>'
+        '<div class="progress-wrap" style="margin-top:4px">'
+        '<div class="progress-fill" style="width:' + f'{imp_w:.0f}' + '%;background:' + imp_color + '"></div>'
+        '</div>'
+        '<div style="display:flex;justify-content:space-between;font-size:9px;color:#9ca3af;margin-bottom:6px">'
+        '<span>impacto</span><span>objetivo 3%</span><span>8%</span>'
+        '</div>'
+
+        + alerta +
+
+        '<details>'
+        '<summary style="cursor:pointer;font-size:12px;color:#6b7280;margin-top:4px">'
+        'Ver ' + str(r["n_paradas"]) + ' pedidos ▾'
+        '</summary>'
+        + peds_html +
+        '</details>'
+        '</div>'
+    )
+
+    st.markdown(html, unsafe_allow_html=True)
 
 # ══════════════════════════════════════════════════════════
 # SIDEBAR

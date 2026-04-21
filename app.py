@@ -233,6 +233,29 @@ def normalizar_columnas(df: pd.DataFrame) -> Optional[pd.DataFrame]:
     }
     df = df.rename(columns={k: v for k, v in MAP.items() if k in df.columns})
 
+    # ── Paso 2.5: deduplicar columnas (si hay dos que mapean al mismo nombre) ──
+    # Ej: si el archivo tenia "Localidad" y "Localidad de entrega", ambas quedan "zona".
+    # Nos quedamos con la primera no-vacia.
+    if df.columns.duplicated().any():
+        # Para cada nombre duplicado, tomar la primera columna que tenga datos
+        new_cols = {}
+        for col_name in df.columns.unique():
+            cols_with_name = [c for i, c in enumerate(df.columns) if c == col_name]
+            if len([c for c in df.columns if c == col_name]) > 1:
+                # Hay duplicados: tomar el sub-DataFrame y combinar
+                sub = df.loc[:, df.columns == col_name]
+                # Priorizar la primera columna con datos no nulos
+                combined = sub.iloc[:, 0]
+                for i in range(1, sub.shape[1]):
+                    combined = combined.fillna(sub.iloc[:, i])
+                    # Si la primera columna esta vacia en una fila, usar la siguiente
+                    mask_empty = combined.isna() | (combined.astype(str).str.strip() == "")
+                    combined.loc[mask_empty] = sub.iloc[:, i][mask_empty]
+                new_cols[col_name] = combined
+            else:
+                new_cols[col_name] = df[col_name]
+        df = pd.DataFrame(new_cols)
+
     # ── Paso 3: validar columna critica ───────────────────
     if "zona" not in df.columns:
         cols_encontradas = ", ".join(f"\'{c}\'" for c in df.columns.tolist())
@@ -286,8 +309,14 @@ def optimizar_rutas(pedidos_df, transportes_df, fletes_man, horas_man):
 
     rutas = []
 
-    for zona in pedidos_df["zona"].unique():
-        peds_zona = pedidos_df[pedidos_df["zona"] == zona].copy().sort_values("cp")
+    # Guard extra: si por alguna razon "zona" devuelve DataFrame (columnas duplicadas)
+    # tomar solo la primera columna
+    zona_col = pedidos_df["zona"]
+    if isinstance(zona_col, pd.DataFrame):
+        zona_col = zona_col.iloc[:, 0]
+
+    for zona in zona_col.unique():
+        peds_zona = pedidos_df[zona_col == zona].copy().sort_values("cp")
         kg_zona   = peds_zona["kilos"].sum()
 
         # Elegir transportista

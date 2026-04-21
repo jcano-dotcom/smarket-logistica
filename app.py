@@ -115,6 +115,39 @@ SAMPLE_TRANSPORTES = pd.DataFrame([
     {"nombre":"Greco - MB 1114","capacidad_kg":10000,"costo_hora":60000,"costo_fijo":0,"ayudante":False},
 ])
 
+# Mapa de LOCALIDAD → CORREDOR (agrupa todas las localidades conocidas en su corredor)
+# Si una localidad no está acá, se agrupa en el corredor más cercano geográficamente
+LOCALIDAD_A_CORREDOR = {
+    # CABA y zonas adyacentes
+    "caba": "CABA", "palermo": "CABA", "belgrano": "CABA", "recoleta": "CABA",
+    "flores": "CABA", "caballito": "CABA", "villa del parque": "CABA",
+    "villa devoto": "CABA", "villa urquiza": "CABA", "saavedra": "CABA",
+    "chacarita": "CABA", "villa crespo": "CABA", "almagro": "CABA",
+    "boedo": "CABA", "villa pueyrredon": "CABA", "villa del parque": "CABA",
+    "paternal": "CABA", "la paternal": "CABA", "villa santa rita": "CABA",
+    "villa luro": "CABA", "villa luro - devoto": "CABA", "mataderos": "CABA",
+    "liniers": "CABA", "villa soldati": "CABA", "villa lugano": "CABA",
+    # Sur-Oeste
+    "lomas del mirador": "Sur-Oeste", "tapiales": "Sur-Oeste",
+    "gonzalez catan": "Sur-Oeste", "gonzález catán": "Sur-Oeste",
+    "ciudadela": "Sur-Oeste", "ramos mejia": "Sur-Oeste", "ramos mejía": "Sur-Oeste",
+    "haedo": "Sur-Oeste", "moron": "Sur-Oeste", "morón": "Sur-Oeste",
+    "castelar": "Sur-Oeste", "ituzaingo": "Sur-Oeste", "ituzaingó": "Sur-Oeste",
+    # Norte Panamericana
+    "san fernando": "Norte", "tigre": "Norte", "munro": "Norte",
+    "villa bosch": "Norte", "villa lynch": "Norte", "villa maipú": "Norte",
+    "villa maipu": "Norte", "san martin": "Norte", "san martín": "Norte",
+    "general san martin": "Norte", "palermo": "Norte",
+    "garín": "Norte", "garin": "Norte", "pilar": "Norte",
+    "del viso": "Norte", "jose c paz": "Norte", "José c paz": "Norte",
+    "malvinas argentinas": "Norte", "grand bourg": "Norte",
+    # Acceso Oeste
+    "moreno": "Acceso Oeste", "paso del rey": "Acceso Oeste",
+    "francisco alvarez": "Acceso Oeste", "francisco álvarez": "Acceso Oeste",
+    "general rodriguez": "Acceso Oeste", "general rodríguez": "Acceso Oeste",
+    "lujan": "Acceso Oeste", "luján": "Acceso Oeste",
+}
+
 ZONAS_TRANS = {
     "Sur-Oeste":    "Gaby",
     "CABA":         "Juan",
@@ -291,58 +324,132 @@ def normalizar_columnas(df: pd.DataFrame) -> Optional[pd.DataFrame]:
         st.warning("⚠️ No quedaron pedidos después de filtrar. Verificá que el archivo tenga filas con kilos > 0.")
         return None
 
+    # ── Paso 8: normalizar zona → corredor conocido ───────
+    # Mapear cada localidad a su corredor geográfico.
+    # Si el valor ya es un corredor conocido, lo dejamos igual.
+    corredores_validos = set(ZONAS_TRANS.keys())
+    def localidad_a_corredor(loc):
+        if not isinstance(loc, str): return "CABA"
+        # Si ya es un corredor válido, mantenerlo
+        if loc in corredores_validos: return loc
+        # Buscar en el mapa de localidades (insensible a mayúsculas)
+        key = loc.strip().lower()
+        if key in LOCALIDAD_A_CORREDOR:
+            return LOCALIDAD_A_CORREDOR[key]
+        # Búsqueda parcial: si la localidad contiene alguna clave conocida
+        for k, v in LOCALIDAD_A_CORREDOR.items():
+            if k in key or key in k:
+                return v
+        # Fallback: CABA si no se reconoce (mejor que crear una ruta huérfana)
+        return "CABA"
+
+    df["zona"] = df["zona"].apply(localidad_a_corredor)
+
     return df.reset_index(drop=True)
 
 # ══════════════════════════════════════════════════════════
 # MOTOR DE RUTEO  ← GUARD CLAUSE CONTRA None
 # ══════════════════════════════════════════════════════════
+def _elegir_transportista(kg_zona, zona, transportes_df):
+    """Devuelve la fila del transportista más adecuado para la zona y el peso."""
+    trans_nom = ZONAS_TRANS.get(zona, "Greco - Utilitario")
+    match = transportes_df[transportes_df["nombre"] == trans_nom]
+    if match.empty:
+        greco = transportes_df[transportes_df["nombre"].str.startswith("Greco")]
+        greco = greco[greco["capacidad_kg"] >= kg_zona].sort_values("capacidad_kg")
+        return greco.iloc[0] if not greco.empty else transportes_df.iloc[0]
+    trans_row = match.iloc[0]
+    if trans_nom.startswith("Greco") and kg_zona > float(trans_row["capacidad_kg"]):
+        greco = transportes_df[transportes_df["nombre"].str.startswith("Greco")]
+        greco = greco[greco["capacidad_kg"] >= kg_zona].sort_values("capacidad_kg")
+        if not greco.empty:
+            trans_row = greco.iloc[0]
+    return trans_row
+
+
+def _consolidar_zonas(pedidos_df, transportes_df):
+    """
+    Regla: usar la MENOR cantidad de fletes posible.
+
+    Prioridad:
+    1. Si TODOS los pedidos del día caben en un utilitario (≤600kg, ≤MAX_PARADAS) → 1 solo viaje.
+    2. Si los pedidos JG caben juntos en utilitario → 1 viaje JG.
+       Si los pedidos Greco caben en un vehículo → 1 viaje Greco.
+    3. Si no caben → una ruta por zona.
+    """
+    zonas_unicas = pedidos_df["zona"].unique().tolist()
+    kg_total = pedidos_df["kilos"].sum()
+    n_total  = len(pedidos_df)
+
+    # ── Nivel 1: todo en un solo utilitario ───────────────
+    if kg_total <= 600 and n_total <= MAX_PARADAS:
+        # Usar el transportista de la zona predominante (la de mayor kg)
+        zona_predominante = (
+            pedidos_df.groupby("zona")["kilos"].sum().idxmax()
+        )
+        nombre = " + ".join(sorted(set(zonas_unicas))) if len(zonas_unicas) > 1 else zonas_unicas[0]
+        return [(nombre, pedidos_df.copy())]
+
+    # ── Nivel 2: consolidar por tipo (JG / Greco) ─────────
+    zonas_jg    = [z for z in zonas_unicas if ZONAS_TRANS.get(z, "") in ("Gaby", "Juan")]
+    zonas_greco = [z for z in zonas_unicas if ZONAS_TRANS.get(z, "") not in ("Gaby", "Juan")]
+    resultado   = []
+
+    if zonas_jg:
+        df_jg = pedidos_df[pedidos_df["zona"].isin(zonas_jg)]
+        kg_jg, n_jg = df_jg["kilos"].sum(), len(df_jg)
+        if kg_jg <= 600 and n_jg <= MAX_PARADAS:
+            nombre = " + ".join(sorted(set(zonas_jg)))
+            resultado.append((nombre, df_jg.copy()))
+        else:
+            for z in zonas_jg:
+                resultado.append((z, pedidos_df[pedidos_df["zona"] == z].copy()))
+
+    if zonas_greco:
+        df_gc = pedidos_df[pedidos_df["zona"].isin(zonas_greco)]
+        kg_gc, n_gc = df_gc["kilos"].sum(), len(df_gc)
+        primera_zona = df_gc["zona"].iloc[0]
+        trans_row = _elegir_transportista(kg_gc, primera_zona, transportes_df)
+        cap = float(trans_row["capacidad_kg"])
+        if kg_gc <= cap and n_gc <= MAX_PARADAS:
+            nombre = " + ".join(sorted(set(zonas_greco)))
+            resultado.append((nombre, df_gc.copy()))
+        else:
+            for z in zonas_greco:
+                resultado.append((z, pedidos_df[pedidos_df["zona"] == z].copy()))
+
+    return resultado
+
+
 def optimizar_rutas(pedidos_df, transportes_df, fletes_man, horas_man):
     # ── Guard: validar entrada ────────────────────────────
     if pedidos_df is None or not isinstance(pedidos_df, pd.DataFrame) or pedidos_df.empty:
         return []
-    if "zona" not in pedidos_df.columns:
-        st.error(
-            "❌ **Error: No se encontró la columna `zona` en el archivo.**\n\n"
-            "Por favor verificá el nombre de las columnas."
-        )
-        return []
-
-    rutas = []
-
-    # Guard extra: si por alguna razon "zona" devuelve DataFrame (columnas duplicadas)
-    # tomar solo la primera columna
     zona_col = pedidos_df["zona"]
     if isinstance(zona_col, pd.DataFrame):
         zona_col = zona_col.iloc[:, 0]
+        pedidos_df = pedidos_df.copy()
+        pedidos_df["zona"] = zona_col
+    if "zona" not in pedidos_df.columns:
+        st.error("❌ **Error: No se encontró la columna `zona` en el archivo.**")
+        return []
 
-    for zona in zona_col.unique():
-        peds_zona = pedidos_df[zona_col == zona].copy().sort_values("cp")
-        kg_zona   = peds_zona["kilos"].sum()
+    # ── Consolidar zonas ──────────────────────────────────
+    grupos = _consolidar_zonas(pedidos_df, transportes_df)
+    rutas  = []
 
-        # Elegir transportista
-        trans_nom = ZONAS_TRANS.get(zona, "Greco - Utilitario")
-        match = transportes_df[transportes_df["nombre"] == trans_nom]
-        if match.empty:
-            greco = transportes_df[transportes_df["nombre"].str.startswith("Greco")]
-            greco = greco[greco["capacidad_kg"] >= kg_zona].sort_values("capacidad_kg")
-            trans_row = greco.iloc[0] if not greco.empty else transportes_df.iloc[0]
-        else:
-            trans_row = match.iloc[0]
-            # Si Greco y carga supera cap, escalar vehiculo
-            if trans_nom.startswith("Greco") and kg_zona > float(trans_row["capacidad_kg"]):
-                greco = transportes_df[transportes_df["nombre"].str.startswith("Greco")]
-                greco = greco[greco["capacidad_kg"] >= kg_zona].sort_values("capacidad_kg")
-                if not greco.empty:
-                    trans_row = greco.iloc[0]
-
-        cap_kg   = float(trans_row["capacidad_kg"])
-        tarifa   = float(trans_row["costo_hora"])
-        fijo     = float(trans_row.get("costo_fijo", 0))
-        ayudante = bool(trans_row.get("ayudante", False))
+    for nombre_zona, grp_df in grupos:
+        kg_grp     = grp_df["kilos"].sum()
+        prima_zona = grp_df["zona"].iloc[0]
+        trans_row  = _elegir_transportista(kg_grp, prima_zona, transportes_df)
+        cap_kg     = float(trans_row["capacidad_kg"])
+        tarifa     = float(trans_row["costo_hora"])
+        fijo       = float(trans_row.get("costo_fijo", 0))
+        ayudante   = bool(trans_row.get("ayudante", False))
 
         # Dividir en chunks si supera capacidad o MAX_PARADAS
         chunks, chunk, kg_chunk = [], [], 0.0
-        for _, ped in peds_zona.iterrows():
+        for _, ped in grp_df.sort_values("cp").iterrows():
             if (kg_chunk + ped["kilos"] > cap_kg or len(chunk) >= MAX_PARADAS) and chunk:
                 chunks.append(chunk)
                 chunk, kg_chunk = [], 0.0
@@ -351,42 +458,45 @@ def optimizar_rutas(pedidos_df, transportes_df, fletes_man, horas_man):
         if chunk:
             chunks.append(chunk)
 
-        for ci, chunk in enumerate(chunks):
-            rid   = f"{zona}_{ci}"
-            kg_t  = sum(p["kilos"] for p in chunk)
-            val_t = sum(p["valor"]  for p in chunk)
-            bul_t = sum(p["bultos"] for p in chunk)
+        for ci, chunk_list in enumerate(chunks):
+            rid   = f"{nombre_zona}_{ci}"
+            sfx   = f" ({ci+1})" if len(chunks) > 1 else ""
+            peds_rows = pd.DataFrame(chunk_list)
+            kg_t  = float(peds_rows["kilos"].sum())
+            val_t = float(peds_rows["valor"].sum())
+            bul_t = int(peds_rows["bultos"].sum())
+            n_p   = len(peds_rows)
 
-            h_auto = auto_horas(len(chunk))
+            h_auto = auto_horas(n_p)
             h_ruta = horas_man.get(rid, h_auto)
             f_auto = auto_flete(h_ruta, tarifa, fijo, ayudante)
             flete  = fletes_man.get(rid, f_auto)
 
             peds_data = []
-            for p in chunk:
+            for _, p in peds_rows.iterrows():
                 peds_data.append({
-                    "id":       str(p.get("id", "")),
-                    "cliente":  str(p.get("cliente", "")),
-                    "direccion":str(p.get("direccion", "")),
-                    "zona":     str(p.get("zona", "")),
-                    "cp":       int(p.get("cp", 0)),
-                    "kilos":    float(p["kilos"]),
-                    "valor":    float(p["valor"]),
-                    "bultos":   int(p.get("bultos", 0)),
-                    "imp_ped":  imp_ped(p["kilos"], p["valor"], kg_t, flete),
-                    "flete_ped":flete * p["kilos"] / kg_t if kg_t > 0 else 0,
+                    "id":        str(p.get("id", "")),
+                    "cliente":   str(p.get("cliente", "")),
+                    "direccion": str(p.get("direccion", "")),
+                    "zona":      str(p.get("zona", "")),
+                    "cp":        int(p.get("cp", 0)),
+                    "kilos":     float(p["kilos"]),
+                    "valor":     float(p["valor"]),
+                    "bultos":    int(p.get("bultos", 0)),
+                    "imp_ped":   imp_ped(p["kilos"], p["valor"], kg_t, flete),
+                    "flete_ped": flete * p["kilos"] / kg_t if kg_t > 0 else 0,
                 })
 
             rutas.append({
                 "id":           rid,
-                "zona":         zona + (f" ({ci+1})" if len(chunks) > 1 else ""),
+                "zona":         nombre_zona + sfx,
                 "transportista":str(trans_row["nombre"]),
                 "vehiculo":     str(trans_row["nombre"]),
                 "cap_kg":       cap_kg,
                 "kg_total":     kg_t,
                 "val_total":    val_t,
                 "bultos_total": bul_t,
-                "n_paradas":    len(chunk),
+                "n_paradas":    n_p,
                 "horas":        h_ruta,
                 "tarifa_hora":  tarifa,
                 "costo_fijo":   fijo,

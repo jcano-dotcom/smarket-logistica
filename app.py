@@ -421,7 +421,11 @@ def _consolidar_zonas(pedidos_df, transportes_df):
     return resultado
 
 
-def optimizar_rutas(pedidos_df, transportes_df, fletes_man, horas_man):
+def optimizar_rutas(pedidos_df, transportes_df, fletes_man, horas_man, asign_man=None, rutas_extra=None):
+    """
+    asign_man  : dict {pedido_id: ruta_idx} — asignaciones manuales de pedidos a rutas
+    rutas_extra: list de int — índices de rutas adicionales vacías creadas por el usuario
+    """
     # ── Guard: validar entrada ────────────────────────────
     if pedidos_df is None or not isinstance(pedidos_df, pd.DataFrame) or pedidos_df.empty:
         return []
@@ -434,11 +438,76 @@ def optimizar_rutas(pedidos_df, transportes_df, fletes_man, horas_man):
         st.error("❌ **Error: No se encontró la columna `zona` en el archivo.**")
         return []
 
-    # ── Consolidar zonas ──────────────────────────────────
-    grupos = _consolidar_zonas(pedidos_df, transportes_df)
+    asign_man = asign_man or {}
+    rutas_extra = rutas_extra or []
+
+    # ── Si hay asignaciones manuales, usarlas. Si no, consolidar automáticamente ──
+    if asign_man:
+        # Agrupar pedidos por ruta_idx según asignación manual
+        grupos_dict = {}
+        pedidos_asignados = set()
+        for _, ped in pedidos_df.iterrows():
+            pid = str(ped.get("id", ""))
+            if pid in asign_man:
+                ridx = asign_man[pid]
+                grupos_dict.setdefault(ridx, []).append(ped)
+                pedidos_asignados.add(pid)
+
+        # Pedidos sin asignar → aplicar consolidación automática
+        peds_sin_asignar = pedidos_df[~pedidos_df["id"].astype(str).isin(pedidos_asignados)]
+        auto_grupos = _consolidar_zonas(peds_sin_asignar, transportes_df) if not peds_sin_asignar.empty else []
+
+        # Agregar rutas extra vacías
+        for ridx in rutas_extra:
+            grupos_dict.setdefault(ridx, [])
+
+        # Convertir a formato lista de (nombre, df)
+        grupos = []
+        # Primero rutas manuales (ordenadas por índice)
+        for ridx in sorted(grupos_dict.keys()):
+            peds_list = grupos_dict[ridx]
+            if peds_list:
+                df_ruta = pd.DataFrame(peds_list)
+                zonas_ruta = df_ruta["zona"].unique()
+                nombre = " + ".join(sorted(set(zonas_ruta))) if len(zonas_ruta) > 1 else zonas_ruta[0]
+                grupos.append((f"R{ridx+1} · {nombre}", df_ruta))
+            else:
+                # Ruta vacía agregada manualmente
+                grupos.append((f"R{ridx+1} · (vacía)", pd.DataFrame(columns=pedidos_df.columns)))
+        # Luego rutas automáticas del resto
+        grupos.extend(auto_grupos)
+    else:
+        grupos = _consolidar_zonas(pedidos_df, transportes_df)
+        # Agregar rutas extra vacías
+        for ridx in rutas_extra:
+            grupos.append((f"R{ridx+1} · (vacía)", pd.DataFrame(columns=pedidos_df.columns)))
+
     rutas  = []
 
     for nombre_zona, grp_df in grupos:
+        # Ruta vacía (agregada manualmente sin pedidos aún)
+        if grp_df.empty:
+            trans_row = transportes_df.iloc[0]  # default: primer transportista
+            cap_kg    = float(trans_row["capacidad_kg"])
+            tarifa    = float(trans_row["costo_hora"])
+            fijo      = float(trans_row.get("costo_fijo", 0))
+            ayudante  = bool(trans_row.get("ayudante", False))
+            rid       = f"{nombre_zona}_empty"
+            h_ruta    = horas_man.get(rid, 4.0)
+            f_auto    = auto_flete(h_ruta, tarifa, fijo, ayudante)
+            flete     = fletes_man.get(rid, f_auto)
+            rutas.append({
+                "id": rid, "zona": nombre_zona,
+                "transportista": str(trans_row["nombre"]),
+                "vehiculo": str(trans_row["nombre"]),
+                "cap_kg": cap_kg, "kg_total": 0, "val_total": 0, "bultos_total": 0,
+                "n_paradas": 0, "horas": h_ruta,
+                "tarifa_hora": tarifa, "costo_fijo": fijo, "ayudante": ayudante,
+                "flete": flete, "flete_auto": f_auto,
+                "impacto": 0, "pct_carga": 0, "peds": [],
+            })
+            continue
+
         kg_grp     = grp_df["kilos"].sum()
         prima_zona = grp_df["zona"].iloc[0]
         trans_row  = _elegir_transportista(kg_grp, prima_zona, transportes_df)
@@ -555,97 +624,87 @@ def load_from_gsheet(url_or_id, creds_json=None) -> Optional[pd.DataFrame]:
 # ══════════════════════════════════════════════════════════
 # RENDER TARJETA
 # ══════════════════════════════════════════════════════════
-def render_ruta_card(r):
+def render_ruta_header_html(r):
+    """Genera el HTML del encabezado de la ruta (sin pedidos)."""
     imp   = r["impacto"]
     pct_c = r["pct_carga"]
     cc    = carga_col(pct_c)
+    ay    = '<span class="badge badge-yellow">+ Ayudante</span>' if r["ayudante"] else ""
+    imp_color = "#16a34a" if imp <= 3 else "#d97706" if imp <= 5 else "#dc2626"
+    imp_w   = min(imp / 8 * 100, 100)
+    carga_w = min(pct_c, 100)
 
-    # ── ayudante badge ────────────────────────────────────
-    ay = '<span class="badge badge-yellow">+ Ayudante</span>' if r["ayudante"] else ""
-
-    # ── filas de pedidos ──────────────────────────────────
-    peds_partes = []
-    for p in r["peds"]:
-        cls = ic_row(p["imp_ped"])
-        peds_partes.append(
-            '<div class="ped-row">'
-            '<div style="flex:1">'
-            '<div style="font-weight:500">' + str(p["direccion"]) + '</div>'
-            '<div style="color:#6b7280;font-size:11px">'
-                + str(p["cliente"]) + " · #" + str(p["id"]) + " · CP " + str(p["cp"]) +
-            '</div>'
-            '</div>'
-            '<div style="text-align:right;flex-shrink:0;padding-left:8px">'
-            '<div style="font-size:12px;font-weight:500">'
-                + f'{p["kilos"]:.0f}' + " kg · " + str(p["bultos"]) + " btos"
-            + '</div>'
-            '<div style="color:#6b7280;font-size:11px">$' + f'{p["valor"]:,.0f}' + '</div>'
-            '<div class="' + cls + '">' + f'{p["imp_ped"]:.2f}' + '%</div>'
-            '</div>'
-            '</div>'
-        )
-    peds_html = "".join(peds_partes)
-
-    # ── alerta impacto ────────────────────────────────────
     merc_min = r["flete"] / 0.03 if r["flete"] > 0 else 0
     alerta = (
-        '<div style="font-size:11px;color:#dc2626;margin-bottom:6px">'
+        '<div style="font-size:11px;color:#dc2626;margin-top:6px">'
         'Para llegar al 3% necesitás $' + f'{merc_min:,.0f}' + ' de mercadería</div>'
     ) if imp > 3 else ""
 
-    # ── color barra de impacto ────────────────────────────
-    imp_color = "#16a34a" if imp <= 3 else "#d97706" if imp <= 5 else "#dc2626"
-    imp_w     = min(imp / 8 * 100, 100)
-    carga_w   = min(pct_c, 100)
-
-    # ── HTML de la tarjeta (sin f-string para evitar escaping de comillas) ──
-    html = (
+    return (
         '<div class="ruta-card">'
         '<div class="ruta-header">'
-        '<div>'
-        '<span class="ruta-title">' + str(r["transportista"]) + '</span>'
-        '<span class="badge badge-blue" style="margin-left:8px">' + str(r["zona"]) + '</span>'
-        '<span class="badge badge-gray" style="margin-left:4px">'
-            + str(r["vehiculo"]).replace("Greco - ", "") + '</span>'
-        + ay +
-        '</div>'
-        '<span class="badge ' + ic_badge(imp) + '" style="font-size:13px">'
+          '<div>'
+            '<span class="ruta-title">' + str(r["transportista"]) + '</span>'
+            '<span class="badge badge-blue" style="margin-left:8px">' + str(r["zona"]) + '</span>'
+            '<span class="badge badge-gray" style="margin-left:4px">'
+              + str(r["vehiculo"]).replace("Greco - ", "") + '</span>'
+            + ay +
+          '</div>'
+          '<span class="badge ' + ic_badge(imp) + '" style="font-size:14px">'
             + f'{imp:.2f}' + '%</span>'
         '</div>'
-
         '<div class="stat-row">'
-        '<span>' + str(r["n_paradas"]) + ' paradas</span>'
-        '<span><span class="stat-val">' + f'{r["kg_total"]:.0f}' + ' kg</span> / '
+          '<span>' + str(r["n_paradas"]) + ' paradas</span>'
+          '<span><span class="stat-val">' + f'{r["kg_total"]:.0f}' + ' kg</span> / '
             + f'{r["cap_kg"]:.0f}' + ' kg</span>'
-        '<span><span class="stat-val" style="color:' + cc + '">'
+          '<span><span class="stat-val" style="color:' + cc + '">'
             + f'{pct_c:.0f}' + '% carga</span></span>'
-        '<span>' + f'{r["horas"]:.1f}' + 'h</span>'
-        '<span>Flete <span class="stat-val">$' + f'{r["flete"]:,.0f}' + '</span></span>'
-        '<span>Merc. <span class="stat-val">$' + f'{r["val_total"]:,.0f}' + '</span></span>'
+          '<span>' + f'{r["horas"]:.1f}' + 'h</span>'
+          '<span>Merc. <span class="stat-val">$' + f'{r["val_total"]:,.0f}' + '</span></span>'
         '</div>'
-
         '<div class="progress-wrap">'
-        '<div class="progress-fill" style="width:' + f'{carga_w:.0f}' + '%;background:' + cc + '"></div>'
+          '<div class="progress-fill" style="width:' + f'{carga_w:.0f}' + '%;background:' + cc + '"></div>'
         '</div>'
         '<div class="progress-wrap" style="margin-top:4px">'
-        '<div class="progress-fill" style="width:' + f'{imp_w:.0f}' + '%;background:' + imp_color + '"></div>'
+          '<div class="progress-fill" style="width:' + f'{imp_w:.0f}' + '%;background:' + imp_color + '"></div>'
         '</div>'
-        '<div style="display:flex;justify-content:space-between;font-size:9px;color:#9ca3af;margin-bottom:6px">'
-        '<span>impacto</span><span>objetivo 3%</span><span>8%</span>'
+        '<div style="display:flex;justify-content:space-between;font-size:9px;color:#9ca3af">'
+          '<span>impacto</span><span>objetivo 3%</span><span>8%</span>'
         '</div>'
-
         + alerta +
-
-        '<details>'
-        '<summary style="cursor:pointer;font-size:12px;color:#6b7280;margin-top:4px">'
-        'Ver ' + str(r["n_paradas"]) + ' pedidos ▾'
-        '</summary>'
-        + peds_html +
-        '</details>'
         '</div>'
     )
 
-    st.markdown(html, unsafe_allow_html=True)
+
+def render_pedido_card_html(p):
+    """HTML de una tarjeta individual de pedido — dirección grande, cliente chico."""
+    cls = ic_row(p["imp_ped"])
+    return (
+        '<div style="padding:10px 12px;border:1px solid #e5e7eb;border-radius:8px;margin-bottom:6px;background:#fafafa">'
+          '<div style="display:flex;justify-content:space-between;gap:8px">'
+            '<div style="flex:1;min-width:0">'
+              '<div style="font-size:15px;font-weight:600;color:#111;line-height:1.3;margin-bottom:3px">'
+                + str(p["direccion"]) + '</div>'
+              '<div style="font-size:11px;color:#6b7280">'
+                + str(p["cliente"]) + ' · #' + str(p["id"])
+                + ' · CP ' + str(p["cp"])
+                + ' · ' + str(p["zona"]) + '</div>'
+            '</div>'
+            '<div style="text-align:right;flex-shrink:0">'
+              '<div style="font-size:13px;font-weight:600">' + f'{p["kilos"]:.0f}' + ' kg · ' + str(p["bultos"]) + ' btos</div>'
+              '<div style="font-size:11px;color:#6b7280">$' + f'{p["valor"]:,.0f}' + '</div>'
+              '<div class="' + cls + '" style="font-size:13px;margin-top:2px">' + f'{p["imp_ped"]:.2f}' + '%</div>'
+            '</div>'
+          '</div>'
+        '</div>'
+    )
+
+
+def render_ruta_card(r):
+    """Mantenido por compatibilidad — versión no interactiva."""
+    html = render_ruta_header_html(r)
+    peds_html = "".join(render_pedido_card_html(p) for p in r["peds"])
+    st.markdown(html + '<details><summary style="cursor:pointer;font-size:12px;color:#6b7280;margin:8px 0">Ver ' + str(len(r["peds"])) + ' pedidos ▾</summary>' + peds_html + '</details>', unsafe_allow_html=True)
 
 # ══════════════════════════════════════════════════════════
 # SIDEBAR
@@ -708,8 +767,11 @@ def sidebar_config():
 # MAIN
 # ══════════════════════════════════════════════════════════
 def main():
-    if "fletes_man"  not in st.session_state: st.session_state["fletes_man"]  = {}
-    if "horas_man"   not in st.session_state: st.session_state["horas_man"]   = {}
+    # Estado de la sesión
+    if "fletes_man"   not in st.session_state: st.session_state["fletes_man"]   = {}
+    if "horas_man"    not in st.session_state: st.session_state["horas_man"]    = {}
+    if "asign_man"    not in st.session_state: st.session_state["asign_man"]    = {}
+    if "rutas_extra"  not in st.session_state: st.session_state["rutas_extra"]  = []
 
     pedidos_df, trans_df = sidebar_config()
 
@@ -719,12 +781,13 @@ def main():
         st.info("← Cargá pedidos desde la barra lateral para comenzar.")
         return
 
-    # Optimizar — nunca puede explotar: guard dentro de optimizar_rutas
+    # Optimizar con asignaciones manuales + rutas extra
     rutas = optimizar_rutas(
-        pedidos_df,
-        trans_df,
+        pedidos_df, trans_df,
         st.session_state["fletes_man"],
         st.session_state["horas_man"],
+        asign_man=st.session_state["asign_man"],
+        rutas_extra=st.session_state["rutas_extra"],
     )
 
     tab_panel, tab_peds, tab_cfg, tab_exp, tab_gs = st.tabs([
@@ -732,41 +795,121 @@ def main():
         "⚙️ Fletes", "⬇️ Exportar Excel", "🔗 Google Sheets",
     ])
 
-    # ── PANEL ─────────────────────────────────────────────
+    # ── PANEL INTERACTIVO ─────────────────────────────────
     with tab_panel:
         tc  = sum(r["flete"]     for r in rutas)
         tv  = sum(r["val_total"] for r in rutas)
         tkg = sum(r["kg_total"]  for r in rutas)
         ig  = tc / tv * 100 if tv > 0 else 0
 
+        # ── KPIs ──────────────────────────────────────────
         c1,c2,c3,c4,c5 = st.columns(5)
-        c1.metric("Rutas",         len(rutas))
+        c1.metric("Rutas activas", len(rutas))
         c2.metric("Pedidos",       sum(r["n_paradas"] for r in rutas))
         c3.metric("Kg total",      f"{tkg:,.0f}")
         c4.metric("Costo flete",   f"${tc:,.0f}")
         c5.metric("Impacto global",f"{ig:.2f}%",
                   delta=f"{ig-3:.2f}% vs 3%", delta_color="inverse")
 
+        # ── Acciones globales ─────────────────────────────
+        col_act1, col_act2, col_act3 = st.columns([1,1,3])
+        with col_act1:
+            if st.button("➕ Agregar nuevo flete", use_container_width=True):
+                # Agregar un índice nuevo que no exista todavía
+                nuevo_idx = len(rutas)
+                st.session_state["rutas_extra"].append(nuevo_idx)
+                st.rerun()
+        with col_act2:
+            if st.button("🔄 Resetear asignación", use_container_width=True,
+                         help="Vuelve a la asignación automática"):
+                st.session_state["asign_man"] = {}
+                st.session_state["rutas_extra"] = []
+                st.session_state["fletes_man"] = {}
+                st.rerun()
+
         st.markdown("---")
 
         if not rutas:
             st.info("No hay rutas generadas.")
-        else:
-            criticas = [r for r in rutas if r["impacto"] > 3]
-            if criticas:
-                st.warning(f"⚠️ {len(criticas)} ruta(s) superan el 3% de impacto.")
-            else:
-                st.success("✅ Todas las rutas están por debajo del 3%.")
+            return
 
-            n = len(rutas)
-            if n == 1:
-                render_ruta_card(rutas[0])
-            else:
-                for i in range(0, n, 2):
-                    col1, col2 = st.columns(2)
-                    with col1: render_ruta_card(rutas[i])
-                    with col2:
-                        if i+1 < n: render_ruta_card(rutas[i+1])
+        criticas = [r for r in rutas if r["impacto"] > 3]
+        if criticas:
+            st.warning(f"⚠️ {len(criticas)} ruta(s) superan el 3% de impacto.")
+        else:
+            st.success("✅ Todas las rutas están por debajo del 3%.")
+
+        # ── Opciones para el selector de movimiento ───────
+        ruta_labels = [f"R{i+1} · {r['transportista']} — {r['zona']}" for i, r in enumerate(rutas)]
+
+        # ── Render tarjetas interactivas ──────────────────
+        n = len(rutas)
+        if n == 1:
+            cols_iter = [[0]]
+        else:
+            cols_iter = [list(range(i, min(i+2, n))) for i in range(0, n, 2)]
+
+        for fila_idxs in cols_iter:
+            cols = st.columns(len(fila_idxs))
+            for col, idx in zip(cols, fila_idxs):
+                with col:
+                    r = rutas[idx]
+                    _render_ruta_interactiva(r, idx, ruta_labels, rutas)
+
+
+def _render_ruta_interactiva(r, idx, ruta_labels, rutas):
+    """Renderiza una ruta con tarjetas de pedidos interactivas."""
+    # Encabezado HTML
+    st.markdown(render_ruta_header_html(r), unsafe_allow_html=True)
+
+    # ── Flete editable ────────────────────────────────────
+    col_f1, col_f2 = st.columns([2, 1])
+    with col_f1:
+        flete_nuevo = st.number_input(
+            f"💰 Flete (R{idx+1})",
+            min_value=0,
+            value=int(r["flete"]),
+            step=1000,
+            key=f"fl_panel_{r['id']}_{idx}",
+            help=f"Automático: ${r['flete_auto']:,.0f}",
+        )
+    with col_f2:
+        imp_nuevo = flete_nuevo / r["val_total"] * 100 if r["val_total"] > 0 else 0
+        color = "#16a34a" if imp_nuevo <= 3 else "#d97706" if imp_nuevo <= 5 else "#dc2626"
+        st.markdown(
+            f'<div style="padding-top:28px;text-align:right;font-size:20px;font-weight:600;color:{color}">{imp_nuevo:.2f}%</div>',
+            unsafe_allow_html=True,
+        )
+
+    # Guardar el flete editado
+    if flete_nuevo != int(r["flete_auto"]):
+        st.session_state["fletes_man"][r["id"]] = flete_nuevo
+    elif r["id"] in st.session_state["fletes_man"]:
+        del st.session_state["fletes_man"][r["id"]]
+
+    # ── Lista de pedidos con selector de movimiento ───────
+    if not r["peds"]:
+        st.info("Esta ruta está vacía. Asigná pedidos desde otras rutas.")
+    else:
+        with st.expander(f"Ver {r['n_paradas']} pedidos", expanded=True):
+            for p in r["peds"]:
+                st.markdown(render_pedido_card_html(p), unsafe_allow_html=True)
+
+                # Selector para mover el pedido a otra ruta
+                opciones = ["— Mantener acá —"] + [lbl for i, lbl in enumerate(ruta_labels) if i != idx]
+                destino = st.selectbox(
+                    f"Mover #{p['id']} →",
+                    opciones,
+                    key=f"mv_{p['id']}_{idx}",
+                    label_visibility="collapsed",
+                )
+                if destino != "— Mantener acá —":
+                    # Encontrar el índice destino
+                    destino_idx = ruta_labels.index(destino)
+                    st.session_state["asign_man"][str(p["id"])] = destino_idx
+                    st.rerun()
+
+    st.markdown("<br>", unsafe_allow_html=True)
 
     # ── PEDIDOS ───────────────────────────────────────────
     with tab_peds:

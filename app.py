@@ -106,9 +106,13 @@ SAMPLE_PEDIDOS = pd.DataFrame([
     {"id":"35188","cliente":"Ramirez Gustavo","direccion":"San Martin esq. Italia","zona":"Acceso Oeste","cp":6700,"kilos":118,"valor":1049708,"bultos":12},
 ])
 
+# Lista de transportistas "únicos" (solo pueden hacer 1 recorrido por día)
+TRANSPORTISTAS_UNICOS = {"Gaby", "Juan", "Ezequiel"}
+
 SAMPLE_TRANSPORTES = pd.DataFrame([
     {"nombre":"Gaby","capacidad_kg":600,"costo_hora":22000,"costo_fijo":0,"ayudante":False},
     {"nombre":"Juan","capacidad_kg":600,"costo_hora":22000,"costo_fijo":0,"ayudante":False},
+    {"nombre":"Ezequiel","capacidad_kg":600,"costo_hora":22000,"costo_fijo":0,"ayudante":False},
     {"nombre":"Greco - Utilitario","capacidad_kg":600,"costo_hora":18000,"costo_fijo":0,"ayudante":False},
     {"nombre":"Greco - Sprinter","capacidad_kg":2800,"costo_hora":35000,"costo_fijo":50000,"ayudante":True},
     {"nombre":"Greco - MB 608","capacidad_kg":3500,"costo_hora":48000,"costo_fijo":50000,"ayudante":True},
@@ -157,6 +161,14 @@ ZONAS_TRANS = {
 
 AYUDANTE_COSTO = 50000
 MAX_PARADAS    = 8
+
+# Flota Greco: cada entrada es UN vehículo disponible por día (1 chofer = 1 salida)
+# Orden: del más grande al más chico, para asignar primero el vehículo más eficiente
+FLOTA_GRECO = [
+    "Greco - Sprinter",    # chofer 1 → 2800kg
+    "Greco - Utilitario",  # chofer 2 → 600kg (Kangoo)
+    # MB 608 y MB 1114 se usan si los anteriores no alcanzan o se agregan manualmente
+]
 
 # ══════════════════════════════════════════════════════════
 # UTILIDADES
@@ -350,6 +362,12 @@ def normalizar_columnas(df: pd.DataFrame) -> Optional[pd.DataFrame]:
 # ══════════════════════════════════════════════════════════
 # MOTOR DE RUTEO  ← GUARD CLAUSE CONTRA None
 # ══════════════════════════════════════════════════════════
+def _trans_row(nombre, transportes_df):
+    """Devuelve la fila del transportista por nombre."""
+    m = transportes_df[transportes_df["nombre"] == nombre]
+    return m.iloc[0] if not m.empty else transportes_df.iloc[0]
+
+
 def _elegir_transportista(kg_zona, zona, transportes_df):
     """Devuelve la fila del transportista más adecuado para la zona y el peso."""
     trans_nom = ZONAS_TRANS.get(zona, "Greco - Utilitario")
@@ -369,54 +387,152 @@ def _elegir_transportista(kg_zona, zona, transportes_df):
 
 def _consolidar_zonas(pedidos_df, transportes_df):
     """
-    Regla: usar la MENOR cantidad de fletes posible.
+    Motor de ruteo con conocimiento de la flota real de Smarket.
 
-    Prioridad:
-    1. Si TODOS los pedidos del día caben en un utilitario (≤600kg, ≤MAX_PARADAS) → 1 solo viaje.
-    2. Si los pedidos JG caben juntos en utilitario → 1 viaje JG.
-       Si los pedidos Greco caben en un vehículo → 1 viaje Greco.
-    3. Si no caben → una ruta por zona.
+    FLOTA:
+    - Greco: 2 choferes → cada vehículo de FLOTA_GRECO sale exactamente 1 vez por día
+      (Sprinter: pedidos grandes / Utilitario-Kangoo: pedidos chicos)
+    - JG (Gaby, Juan, Ezequiel): 1 sola salida por chofer, 600kg máx cada uno
+
+    ESTRATEGIA:
+    1. Si todo entra en 1 JG → 1 viaje.
+    2. Si no, asignar la Sprinter primero (pedidos más pesados, priorizando Norte
+       + pedidos grandes CABA que no puedan ir en JG).
+    3. Distribuir el resto entre los JG disponibles (balanceado).
+    4. Si sobra algo y la Kangoo tiene capacidad → asignarla.
+    5. Si aún sobra → MB 608 / MB 1114.
+
+    Devuelve lista de tuplas (nombre_ruta, df_pedidos, trans_preferido)
     """
-    zonas_unicas = pedidos_df["zona"].unique().tolist()
-    kg_total = pedidos_df["kilos"].sum()
-    n_total  = len(pedidos_df)
+    df = pedidos_df.copy()
+    resultado = []
 
-    # ── Nivel 1: todo en un solo utilitario ───────────────
+    # ── Caso 1: todo el reparto entra en un utilitario ────
+    kg_total = df["kilos"].sum()
+    n_total  = len(df)
     if kg_total <= 600 and n_total <= MAX_PARADAS:
-        # Usar el transportista de la zona predominante (la de mayor kg)
-        zona_predominante = (
-            pedidos_df.groupby("zona")["kilos"].sum().idxmax()
-        )
-        nombre = " + ".join(sorted(set(zonas_unicas))) if len(zonas_unicas) > 1 else zonas_unicas[0]
-        return [(nombre, pedidos_df.copy())]
+        zonas_u = df["zona"].unique().tolist()
+        zonas_gaby = [z for z in zonas_u if ZONAS_TRANS.get(z, "") == "Gaby"]
+        trans = "Gaby" if zonas_gaby else "Juan"
+        nombre = " + ".join(sorted(set(zonas_u))) if len(zonas_u) > 1 else zonas_u[0]
+        return [(nombre, df, trans)]
 
-    # ── Nivel 2: consolidar por tipo (JG / Greco) ─────────
-    zonas_jg    = [z for z in zonas_unicas if ZONAS_TRANS.get(z, "") in ("Gaby", "Juan")]
-    zonas_greco = [z for z in zonas_unicas if ZONAS_TRANS.get(z, "") not in ("Gaby", "Juan")]
-    resultado   = []
+    # ── Preparar listas de JG disponibles y vehículos Greco ──
+    jg_disponibles = [n for n in ["Gaby", "Juan", "Ezequiel"]
+                      if n in transportes_df["nombre"].values]
+    greco_disponibles = [v for v in FLOTA_GRECO
+                         if v in transportes_df["nombre"].values]
 
-    if zonas_jg:
-        df_jg = pedidos_df[pedidos_df["zona"].isin(zonas_jg)]
-        kg_jg, n_jg = df_jg["kilos"].sum(), len(df_jg)
-        if kg_jg <= 600 and n_jg <= MAX_PARADAS:
-            nombre = " + ".join(sorted(set(zonas_jg)))
-            resultado.append((nombre, df_jg.copy()))
-        else:
-            for z in zonas_jg:
-                resultado.append((z, pedidos_df[pedidos_df["zona"] == z].copy()))
+    # ── Paso 1: asignar Sprinter ──────────────────────────
+    # La Sprinter lleva: primero los pedidos de zonas Greco (Norte, Acceso Oeste)
+    # que no pueden ir en JG, más los pedidos CABA más pesados hasta llenar.
+    sprinter_cap = 0
+    sprinter_nom = None
+    if greco_disponibles:
+        sprinter_nom = greco_disponibles[0]
+        sprinter_cap = float(_trans_row(sprinter_nom, transportes_df)["capacidad_kg"])
 
-    if zonas_greco:
-        df_gc = pedidos_df[pedidos_df["zona"].isin(zonas_greco)]
-        kg_gc, n_gc = df_gc["kilos"].sum(), len(df_gc)
-        primera_zona = df_gc["zona"].iloc[0]
-        trans_row = _elegir_transportista(kg_gc, primera_zona, transportes_df)
-        cap = float(trans_row["capacidad_kg"])
-        if kg_gc <= cap and n_gc <= MAX_PARADAS:
-            nombre = " + ".join(sorted(set(zonas_greco)))
-            resultado.append((nombre, df_gc.copy()))
-        else:
-            for z in zonas_greco:
-                resultado.append((z, pedidos_df[pedidos_df["zona"] == z].copy()))
+    # Separar pedidos por prioridad para la Sprinter:
+    # Prioridad A: zonas que NO son JG (Norte, Acceso Oeste, etc.)
+    zonas_no_jg = [z for z in df["zona"].unique()
+                   if ZONAS_TRANS.get(z, "") not in jg_disponibles + ["Gaby","Juan","Ezequiel"]]
+    peds_no_jg = df[df["zona"].isin(zonas_no_jg)].sort_values("cp")
+    peds_jg    = df[~df["zona"].isin(zonas_no_jg)].sort_values("kilos", ascending=False)
+
+    # Armar carga de la Sprinter: primero los de zona no-JG, luego los pesados de JG
+    sprinter_idx = []
+    sprinter_kg  = 0.0
+
+    if sprinter_nom:
+        for _, p in peds_no_jg.iterrows():
+            if sprinter_kg + p["kilos"] <= sprinter_cap and len(sprinter_idx) < MAX_PARADAS:
+                sprinter_idx.append(p.name)
+                sprinter_kg += p["kilos"]
+
+        # Completar Sprinter con los más pesados de JG hasta llegar a ~90% de carga
+        for _, p in peds_jg.iterrows():
+            espacio_restante = sprinter_cap - sprinter_kg
+            # Solo agregar pedidos pesados que valen la pena en la Sprinter
+            if (espacio_restante >= p["kilos"] and
+                len(sprinter_idx) < MAX_PARADAS and
+                p["kilos"] >= 150):  # solo pedidos ≥150kg van al camión
+                sprinter_idx.append(p.name)
+                sprinter_kg += p["kilos"]
+
+    df_sprinter    = df.loc[sprinter_idx] if sprinter_idx else pd.DataFrame(columns=df.columns)
+    df_resto       = df.drop(index=sprinter_idx)
+
+    if not df_sprinter.empty:
+        zonas_s = df_sprinter["zona"].unique()
+        nombre  = " + ".join(sorted(set(zonas_s))) if len(zonas_s) > 1 else zonas_s[0]
+        resultado.append((nombre, df_sprinter, sprinter_nom))
+
+    # ── Paso 2: distribuir el resto entre JG (balanceado por kg) ──
+    if not df_resto.empty:
+        # Distribuir el resto entre los JG de forma balanceada.
+        # Estrategia: primero ordena los pedidos de MAYOR a MENOR kg,
+        # luego asigna cada uno al JG que tiene MENOS carga acumulada
+        # (garantiza balance), respetando capacidad y MAX_PARADAS.
+        df_resto_sorted = df_resto.sort_values("kilos", ascending=False)
+
+        jg_rutas = {nom: {"peds": [], "kg": 0.0} for nom in jg_disponibles}
+        sin_asignar = []
+
+        for _, p in df_resto_sorted.iterrows():
+            # Asignar al JG con MENOS carga que aún tenga capacidad
+            candidatos = [
+                (jg_rutas[nom]["kg"], nom)
+                for nom in jg_disponibles
+                if (600 - jg_rutas[nom]["kg"] >= p["kilos"] and
+                    len(jg_rutas[nom]["peds"]) < MAX_PARADAS)
+            ]
+            if candidatos:
+                # El de menos carga
+                _, mejor = min(candidatos)
+                jg_rutas[mejor]["peds"].append(p.name)
+                jg_rutas[mejor]["kg"] += p["kilos"]
+            else:
+                sin_asignar.append(p.name)
+
+        for nom in jg_disponibles:
+            peds_idx = jg_rutas[nom]["peds"]
+            if peds_idx:
+                # Ordenar los pedidos por CP para recorrido lógico
+                df_jg = df.loc[peds_idx].sort_values("cp")
+                zonas_j = df_jg["zona"].unique()
+                nombre  = " + ".join(sorted(set(zonas_j))) if len(zonas_j) > 1 else zonas_j[0]
+                resultado.append((nombre, df_jg, nom))
+
+        # ── Paso 3: sobrantes → Kangoo / MB 608 ──────────
+        if sin_asignar:
+            df_sin = df.loc[sin_asignar]
+            kg_sin = df_sin["kilos"].sum()
+
+            # Intentar con el segundo vehículo Greco (Kangoo)
+            kangoo_nom = greco_disponibles[1] if len(greco_disponibles) > 1 else None
+            if kangoo_nom:
+                kangoo_cap = float(_trans_row(kangoo_nom, transportes_df)["capacidad_kg"])
+                if kg_sin <= kangoo_cap and len(sin_asignar) <= MAX_PARADAS:
+                    zonas_k = df_sin["zona"].unique()
+                    nombre  = " + ".join(sorted(set(zonas_k))) if len(zonas_k) > 1 else zonas_k[0]
+                    resultado.append((nombre, df_sin, kangoo_nom))
+                else:
+                    # Si no entra en la Kangoo, usar MB 608 / MB 1114
+                    greco_rows = transportes_df[transportes_df["nombre"].str.startswith("Greco")]
+                    greco_rows = greco_rows.sort_values("capacidad_kg")
+                    grande = greco_rows[greco_rows["capacidad_kg"] >= kg_sin]
+                    t_nom = str(grande.iloc[0]["nombre"]) if not grande.empty else "Greco - MB 1114"
+                    zonas_k = df_sin["zona"].unique()
+                    nombre  = " + ".join(sorted(set(zonas_k))) if len(zonas_k) > 1 else zonas_k[0]
+                    resultado.append((nombre, df_sin, t_nom))
+            else:
+                # Solo hay Sprinter, usar MB
+                greco_rows = transportes_df[transportes_df["nombre"].str.startswith("Greco")]
+                grande = greco_rows[greco_rows["capacidad_kg"] >= kg_sin].sort_values("capacidad_kg")
+                t_nom  = str(grande.iloc[0]["nombre"]) if not grande.empty else "Greco - MB 1114"
+                zonas_k = df_sin["zona"].unique()
+                nombre  = " + ".join(sorted(set(zonas_k))) if len(zonas_k) > 1 else zonas_k[0]
+                resultado.append((nombre, df_sin, t_nom))
 
     return resultado
 
@@ -484,9 +600,9 @@ def optimizar_rutas(pedidos_df, transportes_df, fletes_man, horas_man, asign_man
         # Luego rutas automáticas del resto
         grupos.extend(auto_grupos)
     else:
-        grupos_base = _consolidar_zonas(pedidos_df, transportes_df)
-        grupos = [(n, df, None) for (n, df) in grupos_base]
-        # Agregar rutas extra vacías (pueden ser int o dict)
+        # _consolidar_zonas ya devuelve tuplas de 3 (nombre, df, trans_pref)
+        grupos = _consolidar_zonas(pedidos_df, transportes_df)
+        # Agregar rutas extra vacías
         for extra in rutas_extra:
             if isinstance(extra, dict):
                 ridx = extra["idx"]
@@ -496,9 +612,7 @@ def optimizar_rutas(pedidos_df, transportes_df, fletes_man, horas_man, asign_man
                 trans_pref = None
             grupos.append((f"R{ridx+1} · (vacía)", pd.DataFrame(columns=pedidos_df.columns), trans_pref))
 
-    # Auto-extend: el bloque anterior dejó grupos como tuplas de 2 si venía del caso asign_man
-    # (ya lo arreglamos ahí), o como tuplas de 3 si viene del else. Todo uniforme en tuplas de 3.
-    # Si alguna tupla de 2 quedara, la convertimos:
+    # Uniformar tuplas (por si alguna viniera de 2 elementos)
     grupos = [g if len(g) == 3 else (g[0], g[1], None) for g in grupos]
 
     rutas  = []
@@ -809,11 +923,25 @@ def _render_widget_drag_and_drop(rutas):
     for i, r in enumerate(rutas):
         peds_js = []
         for p in r["peds"]:
+            # Extraer localidad desde la dirección si está en formato "calle, num, ..., loc, ..."
+            # o usar la zona como fallback
+            dir_str = str(p["direccion"])
+            loc = str(p.get("zona", ""))
+            # Si la dirección tiene comas, la última parte antes de "Buenos Aires"/"CABA" suele ser localidad
+            partes = [x.strip() for x in dir_str.split(",") if x.strip()]
+            for parte in reversed(partes):
+                pl = parte.lower()
+                if pl and pl not in ("buenos aires", "ciudad autonoma de buenos aires",
+                                     "ciudad autónoma de buenos aires", "argentina", "caba"):
+                    if not pl.isdigit():  # descartar CP o números
+                        loc = parte
+                        break
             peds_js.append({
                 "id":      str(p["id"]),
-                "dir":     str(p["direccion"]),
+                "dir":     dir_str,
                 "cli":     str(p["cliente"]),
                 "zona":    str(p["zona"]),
+                "loc":     loc,
                 "cp":      int(p["cp"]),
                 "kg":      float(p["kilos"]),
                 "btos":    int(p["bultos"]),
@@ -890,22 +1018,61 @@ def _render_widget_drag_and_drop(rutas):
     display: flex; flex-direction: column; gap: 6px;
   }
   .ped {
+    display: flex;
     background: #fafafa;
     border: 1px solid #e5e7eb;
     border-radius: 8px;
-    padding: 10px 12px;
-    cursor: grab;
-    user-select: none;
+    overflow: hidden;
     transition: box-shadow .15s;
   }
-  .ped:active { cursor: grabbing; }
   .ped:hover { box-shadow: 0 2px 6px rgba(0,0,0,.08); border-color: #9ca3af; }
   .ped.dragging { opacity: 0.3; }
-  .ped-dir { font-size: 15px; font-weight: 600; color: #111; line-height: 1.3; }
-  .ped-cli { font-size: 11px; color: #6b7280; margin-top: 2px; }
+  .ped-handle {
+    flex-shrink: 0;
+    padding: 10px 8px;
+    background: #f3f4f6;
+    color: #6b7280;
+    cursor: grab;
+    user-select: none;
+    display: flex;
+    align-items: center;
+    font-size: 14px;
+    border-right: 1px solid #e5e7eb;
+  }
+  .ped-handle:active { cursor: grabbing; }
+  .ped-handle:hover { background: #e5e7eb; color: #111; }
+  .ped-body {
+    flex: 1;
+    padding: 10px 12px;
+    min-width: 0;
+  }
+  .ped-loc {
+    font-size: 11px;
+    font-weight: 600;
+    color: #2563eb;
+    text-transform: uppercase;
+    letter-spacing: 0.3px;
+    margin-bottom: 3px;
+  }
+  .ped-dir {
+    font-size: 15px;
+    font-weight: 600;
+    color: #111;
+    line-height: 1.3;
+    user-select: text;
+    cursor: text;
+  }
+  .ped-cli {
+    font-size: 11px;
+    color: #6b7280;
+    margin-top: 2px;
+    user-select: text;
+    cursor: text;
+  }
   .ped-stats {
     display: flex; justify-content: space-between; margin-top: 6px;
     font-size: 11px;
+    user-select: text;
   }
   .ped-kg { font-weight: 500; }
   .ped-val { color: #6b7280; }
@@ -985,24 +1152,33 @@ function render() {
         const im = impColor(p.imp);
         const ped = document.createElement("div");
         ped.className = "ped";
-        ped.draggable = true;
         ped.dataset.pid = p.id;
         ped.dataset.fromRuta = ri;
+        // La localidad (loc) se muestra grande arriba; usamos p.loc si viene, sino p.zona
+        const locLabel = p.loc || p.zona || "";
         ped.innerHTML = `
-          <div class="ped-dir">${p.dir}</div>
-          <div class="ped-cli">${p.cli} · #${p.id} · CP ${p.cp} · ${p.zona}</div>
-          <div class="ped-stats">
-            <span class="ped-kg">${p.kg.toFixed(0)} kg · ${p.btos} btos</span>
-            <span class="ped-val">$${fmt(p.val)}</span>
-            <span class="ped-imp" style="color:${im.col}">${p.imp.toFixed(2)}%</span>
+          <div class="ped-handle" draggable="true" title="Arrastrar para mover">⋮⋮</div>
+          <div class="ped-body">
+            <div class="ped-loc">📍 ${locLabel}</div>
+            <div class="ped-dir">${p.dir}</div>
+            <div class="ped-cli">${p.cli} · #${p.id} · CP ${p.cp}</div>
+            <div class="ped-stats">
+              <span class="ped-kg">${p.kg.toFixed(0)} kg · ${p.btos} btos</span>
+              <span class="ped-val">$${fmt(p.val)}</span>
+              <span class="ped-imp" style="color:${im.col}">${p.imp.toFixed(2)}%</span>
+            </div>
           </div>
         `;
-        ped.addEventListener("dragstart", (e) => {
+        // Drag SOLO desde el handle
+        const handle = ped.querySelector(".ped-handle");
+        handle.addEventListener("dragstart", (e) => {
           e.dataTransfer.setData("pid", p.id);
           e.dataTransfer.setData("from", ri);
           ped.classList.add("dragging");
+          // Hacer que el drag image sea la tarjeta completa
+          e.dataTransfer.setDragImage(ped, 20, 20);
         });
-        ped.addEventListener("dragend", () => {
+        handle.addEventListener("dragend", () => {
           ped.classList.remove("dragging");
         });
         zone.appendChild(ped);
@@ -1145,16 +1321,31 @@ def main():
         # ── PASO 3: Acciones globales (agregar flete con selector de transportista) ──
         st.markdown("---")
         st.markdown("#### ➕ Agregar un nuevo flete manual")
+        # Transportistas únicos ya asignados en las rutas actuales
+        usados = set(r["transportista"] for r in rutas)
+        disponibles = []
+        for nom in trans_df["nombre"].tolist():
+            # Excluir JG únicos que ya estén en uso
+            if nom in TRANSPORTISTAS_UNICOS and nom in usados:
+                continue
+            disponibles.append(nom)
+
         col_sel, col_btn, col_reset = st.columns([3, 1, 1])
         with col_sel:
-            trans_nuevo = st.selectbox(
-                "Elegí transportista para el nuevo flete",
-                options=trans_df["nombre"].tolist(),
-                key="sel_nuevo_trans",
-                label_visibility="collapsed",
-            )
+            if disponibles:
+                trans_nuevo = st.selectbox(
+                    "Elegí transportista para el nuevo flete",
+                    options=disponibles,
+                    key="sel_nuevo_trans",
+                    label_visibility="collapsed",
+                    help="Gaby/Juan/Ezequiel solo pueden hacer 1 recorrido por día. Greco puede hacer varios.",
+                )
+            else:
+                trans_nuevo = None
+                st.info("No hay transportistas disponibles.")
         with col_btn:
-            if st.button("➕ Agregar", use_container_width=True, type="primary"):
+            disabled = trans_nuevo is None
+            if st.button("➕ Agregar", use_container_width=True, type="primary", disabled=disabled):
                 nuevo_idx = max([len(rutas)] + [
                     (e["idx"] if isinstance(e, dict) else e) + 1
                     for e in st.session_state["rutas_extra"]

@@ -94,16 +94,16 @@ st.markdown("""
 # DATOS DE MUESTRA
 # ══════════════════════════════════════════════════════════
 SAMPLE_PEDIDOS = pd.DataFrame([
-    {"id":"35268","cliente":"Sebastian Duarte (1)","direccion":"Av. S. Martin 7300","zona":"Sur-Oeste","cp":1419,"kilos":114,"valor":570137,"bultos":74},
-    {"id":"35269","cliente":"Sebastian Duarte (2)","direccion":"Av. S. Martin 7300","zona":"Sur-Oeste","cp":1419,"kilos":5,"valor":60077,"bultos":1},
-    {"id":"35250","cliente":"Buenos Alimentos BSM1644","direccion":"Av. General Paz 12301","zona":"Sur-Oeste","cp":1752,"kilos":125,"valor":755344,"bultos":10},
-    {"id":"35178","cliente":"Servicios en Gastronomia SRL","direccion":"Lisandro de la Torre 1609","zona":"Sur-Oeste","cp":1752,"kilos":55,"valor":507580,"bultos":6},
-    {"id":"35241","cliente":"Outletbar Misiones","direccion":"Perdriel 1151","zona":"CABA","cp":1279,"kilos":48,"valor":224813,"bultos":28},
-    {"id":"35265","cliente":"Fuerzas del Interior SRL","direccion":"Av. Garmendia 4813","zona":"CABA","cp":1427,"kilos":175,"valor":388527,"bultos":13},
-    {"id":"35282","cliente":"Cincunegui Jorge","direccion":"Montevideo 274","zona":"Norte","cp":1648,"kilos":27,"valor":180113,"bultos":3},
-    {"id":"35141","cliente":"Francisco Orlando Chavez","direccion":"Cordero 3821","zona":"Norte","cp":1645,"kilos":782,"valor":4176564,"bultos":64},
-    {"id":"35232","cliente":"Dam Eventos S.R.L.","direccion":"Eduardo Wilde 1561","zona":"Acceso Oeste","cp":1746,"kilos":289,"valor":1371475,"bultos":34},
-    {"id":"35188","cliente":"Ramirez Gustavo","direccion":"San Martin esq. Italia","zona":"Acceso Oeste","cp":6700,"kilos":118,"valor":1049708,"bultos":12},
+    {"id":"35268","cliente":"Sebastian Duarte (1)","direccion":"Av. S. Martin 7300","zona":"Villa Devoto","localidad":"Villa Devoto","cp":1419,"kilos":114,"valor":570137,"bultos":74},
+    {"id":"35269","cliente":"Sebastian Duarte (2)","direccion":"Av. S. Martin 7300","zona":"Villa Devoto","localidad":"Villa Devoto","cp":1419,"kilos":5,"valor":60077,"bultos":1},
+    {"id":"35250","cliente":"Buenos Alimentos BSM1644","direccion":"Av. General Paz 12301","zona":"Lomas del Mirador","localidad":"Lomas del Mirador","cp":1752,"kilos":125,"valor":755344,"bultos":10},
+    {"id":"35178","cliente":"Servicios en Gastronomia SRL","direccion":"Lisandro de la Torre 1609","zona":"Lomas del Mirador","localidad":"Lomas del Mirador","cp":1752,"kilos":55,"valor":507580,"bultos":6},
+    {"id":"35241","cliente":"Outletbar Misiones","direccion":"Perdriel 1151","zona":"CABA","localidad":"CABA","cp":1279,"kilos":48,"valor":224813,"bultos":28},
+    {"id":"35265","cliente":"Fuerzas del Interior SRL","direccion":"Av. Garmendia 4813","zona":"Chacarita","localidad":"Chacarita","cp":1427,"kilos":175,"valor":388527,"bultos":13},
+    {"id":"35282","cliente":"Cincunegui Jorge","direccion":"Montevideo 274","zona":"Tigre","localidad":"Tigre","cp":1648,"kilos":27,"valor":180113,"bultos":3},
+    {"id":"35141","cliente":"Francisco Orlando Chavez","direccion":"Cordero 3821","zona":"San Fernando","localidad":"San Fernando","cp":1645,"kilos":782,"valor":4176564,"bultos":64},
+    {"id":"35232","cliente":"Dam Eventos S.R.L.","direccion":"Eduardo Wilde 1561","zona":"Francisco Álvarez","localidad":"Francisco Álvarez","cp":1746,"kilos":289,"valor":1371475,"bultos":34},
+    {"id":"35188","cliente":"Ramirez Gustavo","direccion":"San Martin esq. Italia","zona":"Luján","localidad":"Luján","cp":6700,"kilos":118,"valor":1049708,"bultos":12},
 ])
 
 # Lista de transportistas "únicos" (solo pueden hacer 1 recorrido por día)
@@ -945,6 +945,7 @@ def optimizar_rutas(pedidos_df, transportes_df, fletes_man, horas_man, asign_man
                     "cliente":   str(p.get("cliente", "")),
                     "direccion": str(p.get("direccion", "")),
                     "zona":      str(p.get("zona", "")),
+                    "localidad": str(p.get("localidad", "") or p.get("zona", "")),
                     "cp":        int(p.get("cp", 0)),
                     "kilos":     float(p["kilos"]),
                     "valor":     float(p["valor"]),
@@ -1177,13 +1178,15 @@ def _render_widget_drag_and_drop(rutas):
     for i, r in enumerate(rutas):
         peds_js = []
         for p in r["peds"]:
-            # Extraer localidad desde la dirección si está en formato "calle, num, ..., loc, ..."
-            # o usar la zona como fallback
             dir_str = str(p["direccion"])
-            loc = str(p.get("zona", ""))
-            # Si la dirección tiene comas, la última parte antes de "Buenos Aires"/"CABA" suele ser localidad
-            # Localidad = zona (ya normalizada en el paso 8 de normalizar_columnas)
-            localidad_real = str(p.get("zona", "")) or str(p.get("localidad", ""))
+            # Prioridad de localidad:
+            # 1. columna "localidad" (del Excel original, ya limpia por normalizar_columnas)
+            # 2. columna "zona" (si localidad no está disponible)
+            localidad_real = (
+                str(p.get("localidad", "")).strip()
+                or str(p.get("zona", "")).strip()
+                or ""
+            )
 
             # Corredor macro para mostrar en la tarjeta
             corrs_p = p.get("_corredores_ok", set()) or corredores_de_localidad(localidad_real)

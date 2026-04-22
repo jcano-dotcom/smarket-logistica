@@ -890,7 +890,8 @@ def optimizar_rutas(pedidos_df, transportes_df, fletes_man, horas_man, asign_man
             chunks.append(chunk)
 
         for ci, chunk_list in enumerate(chunks):
-            rid   = f"{nombre_zona}_{ci}"
+            # ID único: transportista + índice global (evita duplicados por corredor)
+            rid   = f"{str(trans_row['nombre']).replace(' ', '_')}_{len(rutas)}"
             sfx   = f" ({ci+1})" if len(chunks) > 1 else ""
             peds_rows = pd.DataFrame(chunk_list)
             kg_t  = float(peds_rows["kilos"].sum())
@@ -1147,20 +1148,32 @@ def _render_widget_drag_and_drop(rutas):
             dir_str = str(p["direccion"])
             loc = str(p.get("zona", ""))
             # Si la dirección tiene comas, la última parte antes de "Buenos Aires"/"CABA" suele ser localidad
-            partes = [x.strip() for x in dir_str.split(",") if x.strip()]
-            for parte in reversed(partes):
-                pl = parte.lower()
-                if pl and pl not in ("buenos aires", "ciudad autonoma de buenos aires",
-                                     "ciudad autónoma de buenos aires", "argentina", "caba"):
-                    if not pl.isdigit():  # descartar CP o números
-                        loc = parte
-                        break
+            # Localidad = zona (ya normalizada en el paso 8 de normalizar_columnas)
+            localidad_real = str(p.get("zona", "")) or str(p.get("localidad", ""))
+
+            # Corredor macro para mostrar en la tarjeta
+            corrs_p = p.get("_corredores_ok", set()) or corredores_de_localidad(localidad_real)
+            if isinstance(corrs_p, (set, frozenset)):
+                corr_macro = min(corrs_p, key=lambda c: CORREDORES_SIZE.get(c, 999)) if corrs_p else ""
+            else:
+                corr_macro = ""
+            # Simplificar etiqueta del corredor macro
+            MACRO_LABEL = {
+                "Norte 1": "Norte", "Norte 2": "Norte",
+                "Noroeste 1": "Noroeste", "Noroeste 2": "Noroeste",
+                "Oeste": "Oeste",
+                "Norte-CABA-Sur": "CABA-Sur",
+                "Sur 1": "Sur",
+                "CABA": "CABA",
+            }
+            zona_label = MACRO_LABEL.get(corr_macro, corr_macro)
+
             peds_js.append({
                 "id":      str(p["id"]),
                 "dir":     dir_str,
                 "cli":     str(p["cliente"]),
-                "zona":    str(p["zona"]),
-                "loc":     loc,
+                "zona":    zona_label,          # etiqueta compacta (Sur/Norte/CABA/etc.)
+                "loc":     localidad_real,       # localidad real (Recoleta, Tigre, etc.)
                 "cp":      int(p["cp"]),
                 "kg":      float(p["kilos"]),
                 "btos":    int(p["bultos"]),
@@ -1265,26 +1278,44 @@ def _render_widget_drag_and_drop(rutas):
     padding: 10px 12px;
     min-width: 0;
   }
-  .ped-loc {
-    font-size: 11px;
-    font-weight: 600;
-    color: #2563eb;
+  .ped-zona-tag {
+    display: inline-block;
+    padding: 1px 7px;
+    border-radius: 99px;
+    font-size: 10px;
+    font-weight: 700;
     text-transform: uppercase;
-    letter-spacing: 0.3px;
-    margin-bottom: 3px;
+    letter-spacing: 0.4px;
+    margin-bottom: 4px;
+    background: #dbeafe;
+    color: #1e40af;
   }
-  .ped-dir {
-    font-size: 15px;
-    font-weight: 600;
+  .ped-zona-tag.sur    { background:#dcfce7; color:#166534; }
+  .ped-zona-tag.norte  { background:#fef9c3; color:#854d0e; }
+  .ped-zona-tag.caba   { background:#ede9fe; color:#5b21b6; }
+  .ped-zona-tag.oeste  { background:#ffedd5; color:#9a3412; }
+  .ped-zona-tag.noroeste { background:#fce7f3; color:#9d174d; }
+  .ped-zona-tag.cabasur  { background:#e0f2fe; color:#0c4a6e; }
+  .ped-loc {
+    font-size: 13px;
+    font-weight: 700;
     color: #111;
-    line-height: 1.3;
+    margin-bottom: 2px;
     user-select: text;
     cursor: text;
+  }
+  .ped-dir {
+    font-size: 12px;
+    font-weight: 400;
+    color: #374151;
+    line-height: 1.35;
+    user-select: text;
+    cursor: text;
+    margin-bottom: 2px;
   }
   .ped-cli {
     font-size: 11px;
     color: #6b7280;
-    margin-top: 2px;
     user-select: text;
     cursor: text;
   }
@@ -1373,13 +1404,28 @@ function render() {
         ped.className = "ped";
         ped.dataset.pid = p.id;
         ped.dataset.fromRuta = ri;
-        // La localidad (loc) se muestra grande arriba; usamos p.loc si viene, sino p.zona
-        const locLabel = p.loc || p.zona || "";
+        // Clase CSS del tag de zona (para el color del badge)
+        const zonaCls = {
+          "Sur": "sur", "Norte": "norte", "CABA": "caba",
+          "Oeste": "oeste", "Noroeste": "noroeste", "CABA-Sur": "cabasur"
+        }[p.zona] || "";
+
+        // Limpiar la dirección: quitar partes genéricas de Google Maps
+        const dirClean = p.dir
+          .replace(/, Ciudad Autónoma de Buenos Aires, Argentina/gi, "")
+          .replace(/, Ciudad Autonoma de Buenos Aires, Argentina/gi, "")
+          .replace(/, Buenos Aires, Argentina/gi, "")
+          .replace(/, Argentina/gi, "")
+          .replace(/[, ]+/g, ", ")   // normalizar separadores
+          .replace(/,$/, "")      // quitar coma final
+          .trim();
+
         ped.innerHTML = `
           <div class="ped-handle" draggable="true" title="Arrastrar para mover">⋮⋮</div>
           <div class="ped-body">
-            <div class="ped-loc">📍 ${locLabel}</div>
-            <div class="ped-dir">${p.dir}</div>
+            <span class="ped-zona-tag ${zonaCls}">${p.zona}</span>
+            <div class="ped-loc">${p.loc || p.zona}</div>
+            <div class="ped-dir">${dirClean}</div>
             <div class="ped-cli">${p.cli} · #${p.id} · CP ${p.cp}</div>
             <div class="ped-stats">
               <span class="ped-kg">${p.kg.toFixed(0)} kg · ${p.btos} btos</span>

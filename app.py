@@ -1330,20 +1330,24 @@ def _render_widget_drag_and_drop(rutas):
   .ped-zona-tag.oeste  { background:#ffedd5; color:#9a3412; }
   .ped-zona-tag.noroeste { background:#fce7f3; color:#9d174d; }
   .ped-zona-tag.cabasur  { background:#e0f2fe; color:#0c4a6e; }
-  /* Fila superior: dirección grande a la izq, zona+valor a la der */
+  /* Layout de la tarjeta de pedido */
   .ped-top-row {
     display: flex;
     justify-content: space-between;
     align-items: flex-start;
-    gap: 10px;
-    margin-bottom: 4px;
+    gap: 8px;
+    margin-bottom: 3px;
   }
-  .ped-right-top {
+  /* Columna izquierda: dirección + kg en la misma línea */
+  .ped-left {
+    flex: 1;
+    min-width: 0;
+  }
+  .ped-dir-row {
     display: flex;
-    flex-direction: column;
-    align-items: flex-end;
-    flex-shrink: 0;
-    gap: 2px;
+    align-items: baseline;
+    gap: 8px;
+    flex-wrap: wrap;
   }
   .ped-dir {
     font-size: 15px;
@@ -1352,26 +1356,43 @@ def _render_widget_drag_and_drop(rutas):
     line-height: 1.3;
     user-select: text;
     cursor: text;
-    flex: 1;
   }
+  .ped-kg-big {
+    font-size: 14px;
+    font-weight: 700;
+    color: #374151;
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+  /* Localidad bien visible debajo de la dirección */
   .ped-loc {
-    font-size: 12px;
-    font-weight: 500;
-    color: #4b5563;
-    margin-bottom: 2px;
+    font-size: 13px;
+    font-weight: 600;
+    color: #374151;
+    margin-top: 2px;
     user-select: text;
     cursor: text;
   }
-  .ped-cli {
-    font-size: 11px;
-    color: #9ca3af;
-    user-select: text;
-    cursor: text;
+  /* Columna derecha: valor + % impacto */
+  .ped-right-top {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    flex-shrink: 0;
+    gap: 2px;
   }
   .ped-val {
     font-size: 12px;
     font-weight: 600;
     color: #374151;
+  }
+  /* Cliente + info en gris chico */
+  .ped-cli {
+    font-size: 11px;
+    color: #9ca3af;
+    margin-top: 3px;
+    user-select: text;
+    cursor: text;
   }
   .ped-stats {
     display: flex; justify-content: space-between; margin-top: 6px;
@@ -1480,15 +1501,21 @@ function render() {
           <div class="ped-handle" draggable="true" title="Arrastrar para mover">⋮⋮</div>
           <div class="ped-body">
             <div class="ped-top-row">
-              <div class="ped-dir">${dirClean}</div>
+              <div class="ped-left">
+                <div class="ped-dir-row">
+                  <span class="ped-dir">${dirClean}</span>
+                  <span class="ped-kg-big">${p.kg.toFixed(0)} kg</span>
+                </div>
+                <div class="ped-loc">
+                  <span class="ped-zona-tag ${zonaCls}" style="margin-right:5px">${p.zona}</span>${p.loc || p.zona}
+                </div>
+              </div>
               <div class="ped-right-top">
-                <span class="ped-zona-tag ${zonaCls}">${p.zona}</span>
                 <div class="ped-val">$${fmt(p.val)}</div>
-                <div class="ped-imp" style="color:${im.col}">${p.imp.toFixed(2)}%</div>
+                <div class="ped-imp" style="color:${im.col};font-size:13px;font-weight:700">${p.imp.toFixed(2)}%</div>
               </div>
             </div>
-            <div class="ped-loc">${p.loc || p.zona}</div>
-            <div class="ped-cli">${p.cli} · #${p.id} · CP ${p.cp} · ${p.kg.toFixed(0)} kg · ${p.btos} btos</div>
+            <div class="ped-cli">${p.cli} · #${p.id} · CP ${p.cp} · ${p.btos} btos</div>
           </div>
         `;
         // Drag SOLO desde el handle

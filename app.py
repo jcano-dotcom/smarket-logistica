@@ -119,44 +119,151 @@ SAMPLE_TRANSPORTES = pd.DataFrame([
     {"nombre":"Greco - MB 1114","capacidad_kg":10000,"costo_hora":60000,"costo_fijo":0,"ayudante":False},
 ])
 
-# Mapa de LOCALIDAD → CORREDOR (agrupa todas las localidades conocidas en su corredor)
-# Si una localidad no está acá, se agrupa en el corredor más cercano geográficamente
-LOCALIDAD_A_CORREDOR = {
-    # CABA y zonas adyacentes
-    "caba": "CABA", "palermo": "CABA", "belgrano": "CABA", "recoleta": "CABA",
-    "flores": "CABA", "caballito": "CABA", "villa del parque": "CABA",
-    "villa devoto": "CABA", "villa urquiza": "CABA", "saavedra": "CABA",
-    "chacarita": "CABA", "villa crespo": "CABA", "almagro": "CABA",
-    "boedo": "CABA", "villa pueyrredon": "CABA", "villa del parque": "CABA",
-    "paternal": "CABA", "la paternal": "CABA", "villa santa rita": "CABA",
-    "villa luro": "CABA", "villa luro - devoto": "CABA", "mataderos": "CABA",
-    "liniers": "CABA", "villa soldati": "CABA", "villa lugano": "CABA",
-    # Sur-Oeste
-    "lomas del mirador": "Sur-Oeste", "tapiales": "Sur-Oeste",
-    "gonzalez catan": "Sur-Oeste", "gonzález catán": "Sur-Oeste",
-    "ciudadela": "Sur-Oeste", "ramos mejia": "Sur-Oeste", "ramos mejía": "Sur-Oeste",
-    "haedo": "Sur-Oeste", "moron": "Sur-Oeste", "morón": "Sur-Oeste",
-    "castelar": "Sur-Oeste", "ituzaingo": "Sur-Oeste", "ituzaingó": "Sur-Oeste",
-    # Norte Panamericana
-    "san fernando": "Norte", "tigre": "Norte", "munro": "Norte",
-    "villa bosch": "Norte", "villa lynch": "Norte", "villa maipú": "Norte",
-    "villa maipu": "Norte", "san martin": "Norte", "san martín": "Norte",
-    "general san martin": "Norte", "palermo": "Norte",
-    "garín": "Norte", "garin": "Norte", "pilar": "Norte",
-    "del viso": "Norte", "jose c paz": "Norte", "José c paz": "Norte",
-    "malvinas argentinas": "Norte", "grand bourg": "Norte",
-    # Acceso Oeste
-    "moreno": "Acceso Oeste", "paso del rey": "Acceso Oeste",
-    "francisco alvarez": "Acceso Oeste", "francisco álvarez": "Acceso Oeste",
-    "general rodriguez": "Acceso Oeste", "general rodríguez": "Acceso Oeste",
-    "lujan": "Acceso Oeste", "luján": "Acceso Oeste",
+# ══════════════════════════════════════════════════════════
+# CORREDORES DE RUTEO
+# ══════════════════════════════════════════════════════════
+# Cada corredor define las localidades que se pueden visitar en un SOLO viaje.
+# El motor elige el corredor MÁS CHICO que cubra todos los pedidos a rutear,
+# así prioriza viajes concentrados geográficamente y llena los vehículos.
+
+def _norm_loc(s):
+    """Normaliza una localidad: minúsculas, sin tildes, espacios simples."""
+    import unicodedata
+    s = str(s).strip().lower()
+    s = unicodedata.normalize("NFD", s)
+    s = "".join(c for c in s if unicodedata.category(c) != "Mn")
+    # Quitar guiones y espacios dobles
+    s = " ".join(s.replace("-", " ").split())
+    return s
+
+CORREDORES = {
+    "Norte 1": [
+        "San Isidro","Beccar","San Fernando","Martínez","Villa Adelina","Acassuso",
+        "Tigre","Rincón de Milberg","Pacheco","Benavídez","Belén de Escobar",
+        "Dique Luján","Garín",
+    ],
+    "Norte 2": [
+        "San Isidro","Beccar","San Fernando","Martínez","Acassuso","Villa Adelina",
+        "Tigre","Pacheco","Garín","Don Torcuato","Grand Bourg","Tortuguitas",
+        "Del Viso","Manuel Alberti","Pilar","Fátima","Zelaya","Exaltación de la Cruz",
+    ],
+    "Noroeste 1": [
+        "San Isidro","Beccar","San Fernando","Tigre","Martínez","Acassuso","Munro",
+        "Villa Adelina","Villa Ballester","Villa José León Suárez","Villa Bonich",
+        "Hurlingham","William C. Morris","Bella Vista","San Miguel","Moreno",
+        "Ituzaingó","Paso del Rey","Merlo","Francisco Álvarez","General Rodríguez","Luján",
+    ],
+    "Noroeste 2": [
+        "San Isidro","Beccar","San Fernando","Tigre","Martínez","Munro","Acassuso",
+        "La Lucila","Olivos","Florida","Vicente López","Villa Urquiza","Villa Maipú",
+        "San Martín","Villa Devoto","Caseros","Liniers","Ramos Mejía","Haedo",
+        "Villa Tesei","Morón","Castelar","Ituzaingó","Merlo","Paso del Rey","Moreno",
+        "Francisco Álvarez","General Rodríguez","Luján",
+    ],
+    "Oeste": [
+        "San Isidro","Beccar","San Fernando","Tigre","Martínez","Munro","Acassuso",
+        "La Lucila","Olivos","Florida","Vicente López","Villa Urquiza","Villa Maipú",
+        "San Martín","Villa Devoto","Caseros","Liniers","Ramos Mejía","Parque Avellaneda",
+        "Villa Lugano","Tapiales","La Tablada","San Justo","Aldo Bonzi",
+        "Isidro Casanova","Gregorio de Laferrere","González Catán","Virrey del Pino",
+    ],
+    "Norte-CABA-Sur": [
+        "San Isidro","Beccar","San Fernando","Tigre","Martínez","Munro","Acassuso",
+        "La Lucila","Olivos","Florida","Vicente López","Villa Urquiza","Villa Maipú",
+        "San Martín","Villa Devoto","Caseros","Liniers","Flores","Parque Avellaneda",
+        "Villa Lugano","Tapiales","Lomas de Zamora","Burzaco","Monte Grande","Ezeiza",
+        "Lanús","Adrogué","Temperley","Avellaneda",
+    ],
+    "Sur 1": [
+        "San Isidro","Beccar","San Fernando","Tigre","Martínez","Munro","Acassuso",
+        "La Lucila","Olivos","Florida","Vicente López","Villa Urquiza","Núñez",
+        "Belgrano","Palermo","Recoleta","CABA","Monserrat","San Telmo","Barracas",
+        "Villa Soldati","Puerto Madero","La Boca","Parque Patricios","Nueva Pompeya",
+        "Chacarita","Caballito","Floresta","Colegiales","Villa Crespo","Almagro","San Cristóbal",
+        "Avellaneda","Sarandí","Wilde","Bernal","Quilmes","Berazategui","Ranelagh",
+        "Hudson","Florencio Varela","Villa Elisa","Gonnet","La Plata","Berisso",
+        "Ensenada","Villa Elvira","Lisandro Olmos",
+        # Barrios CABA norte/oeste que geográficamente acompañan este recorrido
+        "La Paternal","Villa del Parque","Villa Pueyrredón","Boedo","San Cristóbal",
+        "Parque Chacabuco","Flores","Floresta","Mataderos","Villa Lugano",
+    ],
+    "CABA": [
+        "San Isidro","Beccar","San Fernando","Tigre","Martínez","Munro","Acassuso",
+        "La Lucila","Olivos","Florida","Vicente López","Villa Urquiza","Núñez",
+        "Belgrano","Palermo","Recoleta","CABA","Monserrat","San Telmo","Barracas",
+        "Villa Soldati","Puerto Madero","La Boca","Parque Patricios","Nueva Pompeya",
+        "Chacarita","Caballito","Floresta","Colegiales","Villa Crespo","Almagro","San Cristóbal",
+        "La Paternal","Villa del Parque","Villa Pueyrredón","Boedo","Parque Chacabuco",
+        "Flores","Mataderos","Villa Lugano","Liniers","Devoto","Villa Devoto",
+    ],
 }
 
+# Tamaño de cada corredor (para preferir los más chicos cuando son equivalentes)
+CORREDORES_SIZE = {k: len(v) for k, v in CORREDORES.items()}
+
+# Índice: localidad_normalizada → set de corredores que la incluyen
+_LOC_TO_CORREDORES = {}
+for corr, locs in CORREDORES.items():
+    for l in locs:
+        key = _norm_loc(l)
+        _LOC_TO_CORREDORES.setdefault(key, set()).add(corr)
+
+# Alias para localidades con nombres alternativos frecuentes
+_ALIASES = {
+    "capital federal": "caba",
+    "ciudad autonoma de buenos aires": "caba",
+    "ciudad autónoma de buenos aires": "caba",
+    "lomas del mirador": "lanus",   # aproximación
+    "villa luro": "villa devoto",   # cercanía
+    "villa luro devoto": "villa devoto",
+    "villa bosch": "villa ballester",  # colindante
+    "la paternal": "caba",
+    "villa del parque": "caba",
+    "villa pueyrredon": "caba",
+    "villa santa rita": "caba",
+    "mataderos": "caba",
+    "boedo": "caba",
+    "saavedra": "caba",
+    "jose c paz": "san miguel",
+    "malvinas argentinas": "grand bourg",
+    "san isidro": "san isidro",
+    "beccar": "beccar",
+    "béccar": "beccar",
+}
+
+def corredores_de_localidad(loc_str):
+    """Devuelve el set de corredores que contienen a esta localidad."""
+    key = _norm_loc(loc_str)
+    # 1. Match directo
+    if key in _LOC_TO_CORREDORES:
+        return _LOC_TO_CORREDORES[key]
+    # 2. Alias
+    if key in _ALIASES:
+        aliased = _ALIASES[key]
+        if aliased in _LOC_TO_CORREDORES:
+            return _LOC_TO_CORREDORES[aliased]
+    # 3. Match por prefijo/substring
+    for k, corrs in _LOC_TO_CORREDORES.items():
+        if key and (key in k or k in key):
+            return corrs
+    # 4. Fallback: CABA (todos los corredores excepto Norte puros)
+    return {"CABA"}
+
+# Retrocompatibilidad: ZONAS_TRANS define el transportista "natural" por nombre de zona
+# (solo usado cuando el usuario carga pedidos con "zona" ya asignada, no localidad)
 ZONAS_TRANS = {
+    "Norte 1":        "Greco - Sprinter",
+    "Norte 2":        "Greco - Sprinter",
+    "Noroeste 1":     "Greco - Sprinter",
+    "Noroeste 2":     "Greco - Sprinter",
+    "Oeste":          "Greco - Sprinter",
+    "Norte-CABA-Sur": "Greco - Sprinter",
+    "Sur 1":          "Greco - Sprinter",
+    "CABA":           "Juan",
+    # Retrocompatibilidad con zonas viejas
     "Sur-Oeste":    "Gaby",
-    "CABA":         "Juan",
     "Norte":        "Greco - Sprinter",
-    "Acceso Oeste": "Greco - Utilitario",
+    "Acceso Oeste": "Greco - Sprinter",
 }
 
 AYUDANTE_COSTO = 50000
@@ -336,26 +443,11 @@ def normalizar_columnas(df: pd.DataFrame) -> Optional[pd.DataFrame]:
         st.warning("⚠️ No quedaron pedidos después de filtrar. Verificá que el archivo tenga filas con kilos > 0.")
         return None
 
-    # ── Paso 8: normalizar zona → corredor conocido ───────
-    # Mapear cada localidad a su corredor geográfico.
-    # Si el valor ya es un corredor conocido, lo dejamos igual.
-    corredores_validos = set(ZONAS_TRANS.keys())
-    def localidad_a_corredor(loc):
-        if not isinstance(loc, str): return "CABA"
-        # Si ya es un corredor válido, mantenerlo
-        if loc in corredores_validos: return loc
-        # Buscar en el mapa de localidades (insensible a mayúsculas)
-        key = loc.strip().lower()
-        if key in LOCALIDAD_A_CORREDOR:
-            return LOCALIDAD_A_CORREDOR[key]
-        # Búsqueda parcial: si la localidad contiene alguna clave conocida
-        for k, v in LOCALIDAD_A_CORREDOR.items():
-            if k in key or key in k:
-                return v
-        # Fallback: CABA si no se reconoce (mejor que crear una ruta huérfana)
-        return "CABA"
-
-    df["zona"] = df["zona"].apply(localidad_a_corredor)
+    # ── Paso 8: preservar localidad real + calcular corredores compatibles ──
+    # No pisamos la zona original porque la queremos mostrar en las tarjetas.
+    # En vez de eso, guardamos para cada pedido los corredores en los que "cabe".
+    df["localidad"] = df["zona"].astype(str)
+    df["_corredores_ok"] = df["zona"].apply(lambda z: corredores_de_localidad(z))
 
     return df.reset_index(drop=True)
 
@@ -385,155 +477,282 @@ def _elegir_transportista(kg_zona, zona, transportes_df):
     return trans_row
 
 
+def _elegir_corredor_para_pedidos(peds_df):
+    """
+    Dado un subconjunto de pedidos:
+    1. Si hay un corredor que cubre a TODOS → retorna el más compacto.
+    2. Si no → retorna el corredor que cubre a MÁS pedidos (mejor aproximación).
+    """
+    if peds_df.empty:
+        return None
+
+    # Intentar intersección perfecta
+    comunes = None
+    for _, p in peds_df.iterrows():
+        corrs = p.get("_corredores_ok", set()) or set()
+        if not isinstance(corrs, (set, frozenset)):
+            corrs = set(corrs) if corrs else set()
+        if comunes is None:
+            comunes = set(corrs)
+        else:
+            comunes &= corrs
+
+    if comunes:
+        return min(comunes, key=lambda c: CORREDORES_SIZE.get(c, 999))
+
+    # Sin corredor común: votar por el que cubre más pedidos
+    conteo = {}
+    for _, p in peds_df.iterrows():
+        corrs = p.get("_corredores_ok", set()) or set()
+        for c in corrs:
+            conteo[c] = conteo.get(c, 0) + 1
+
+    if not conteo:
+        return "CABA"
+
+    max_cov = max(conteo.values())
+    # Entre los que cubren más, el más compacto
+    candidatos = [c for c, v in conteo.items() if v == max_cov]
+    return min(candidatos, key=lambda c: CORREDORES_SIZE.get(c, 999))
+
+
+def _trans_pref_para_corredor(corredor):
+    """Devuelve el transportista sugerido según el corredor."""
+    return ZONAS_TRANS.get(corredor, "Greco - Sprinter")
+
+
+def _bin_packing_por_corredor(peds_df, capacidad):
+    """
+    Agrupa pedidos en 'bins' del tamaño `capacidad` respetando MAX_PARADAS,
+    intentando que todos los pedidos de un bin compartan al menos un corredor.
+
+    Estrategia:
+    1. Ordenar por kilos desc (first-fit decreasing).
+    2. Para cada pedido, buscar un bin existente donde:
+       - quede capacidad suficiente,
+       - quede espacio de paradas,
+       - la intersección de corredores siga siendo no vacía.
+    3. Si no entra en ninguno, abrir un bin nuevo.
+    Devuelve lista de (lista_indices, corredor_elegido_o_None).
+    """
+    bins = []  # cada bin: {"ids": [], "kg": 0, "corrs": set}
+    for _, p in peds_df.sort_values("kilos", ascending=False).iterrows():
+        pid = p.name
+        corrs_p = set(p.get("_corredores_ok") or set())
+        asignado = False
+        for b in bins:
+            if b["kg"] + p["kilos"] > capacidad:      continue
+            if len(b["ids"]) >= MAX_PARADAS:          continue
+            nueva_inter = b["corrs"] & corrs_p
+            if not nueva_inter:                       continue
+            # Ok, cabe acá
+            b["ids"].append(pid)
+            b["kg"] += p["kilos"]
+            b["corrs"] = nueva_inter
+            asignado = True
+            break
+        if not asignado:
+            bins.append({"ids": [pid], "kg": p["kilos"], "corrs": set(corrs_p)})
+    # Elegir corredor final para cada bin (el más chico compatible)
+    resultado = []
+    for b in bins:
+        corr = min(b["corrs"], key=lambda c: CORREDORES_SIZE.get(c, 999)) if b["corrs"] else None
+        resultado.append((b["ids"], corr))
+    return resultado
+
+
+
+# ────────────────────────────────────────────────────────
+# MOTOR DE RUTEO — FILOSOFÍA:
+#   1. Usar la MENOR cantidad de fletes posible.
+#   2. Cada flete debe llenarse al menos al 75% de capacidad.
+#   3. Si no hay suficiente carga para llenar un vehículo al 75%,
+#      absorber esos pedidos en otro flete ya existente.
+#   4. Los corredores son una GUÍA geográfica, no una restricción estricta.
+#      Si mezclar zonas da un recorrido lógico, se hace.
+#   5. Flota Greco: cada vehículo de FLOTA_GRECO sale máximo 1 vez por día.
+#      MB 608 / MB 1114 se usan como extras solo si es necesario.
+#   6. JG (Gaby, Juan, Ezequiel): 1 salida por chofer, 600kg máx.
+# ────────────────────────────────────────────────────────
+
+CARGA_MINIMA_PCT = 0.75   # objetivo mínimo de llenado por vehículo
+
+
+def _flota_ordenada(transportes_df):
+    """
+    Devuelve la lista de vehículos disponibles ordenada de mayor a menor capacidad.
+    Respeta FLOTA_GRECO (máx 1 salida c/u) y los JG (máx 1 salida c/u).
+    """
+    vehiculos = []
+    # Greco (orden FLOTA_GRECO)
+    for nom in FLOTA_GRECO:
+        m = transportes_df[transportes_df["nombre"] == nom]
+        if not m.empty:
+            vehiculos.append({
+                "nombre": nom,
+                "cap": float(m.iloc[0]["capacidad_kg"]),
+                "tarifa": float(m.iloc[0]["costo_hora"]),
+                "fijo":   float(m.iloc[0].get("costo_fijo", 0)),
+                "ayudante": bool(m.iloc[0].get("ayudante", False)),
+                "tipo": "greco_flota",
+                "max_salidas": 1,
+            })
+    # JG
+    for nom in ["Gaby", "Juan", "Ezequiel"]:
+        m = transportes_df[transportes_df["nombre"] == nom]
+        if not m.empty:
+            vehiculos.append({
+                "nombre": nom,
+                "cap": float(m.iloc[0]["capacidad_kg"]),
+                "tarifa": float(m.iloc[0]["costo_hora"]),
+                "fijo":   float(m.iloc[0].get("costo_fijo", 0)),
+                "ayudante": bool(m.iloc[0].get("ayudante", False)),
+                "tipo": "jg",
+                "max_salidas": 1,
+            })
+    # Extras (MB 608, MB 1114 — sin límite de salidas)
+    for _, row in transportes_df.iterrows():
+        nom = row["nombre"]
+        if nom in [v["nombre"] for v in vehiculos]: continue
+        if not nom.startswith("Greco"): continue
+        vehiculos.append({
+            "nombre": nom,
+            "cap": float(row["capacidad_kg"]),
+            "tarifa": float(row["costo_hora"]),
+            "fijo":   float(row.get("costo_fijo", 0)),
+            "ayudante": bool(row.get("ayudante", False)),
+            "tipo": "greco_extra",
+            "max_salidas": 99,
+        })
+    return vehiculos
+
+
 def _consolidar_zonas(pedidos_df, transportes_df):
     """
-    Motor de ruteo con conocimiento de la flota real de Smarket.
-
-    FLOTA:
-    - Greco: 2 choferes → cada vehículo de FLOTA_GRECO sale exactamente 1 vez por día
-      (Sprinter: pedidos grandes / Utilitario-Kangoo: pedidos chicos)
-    - JG (Gaby, Juan, Ezequiel): 1 sola salida por chofer, 600kg máx cada uno
-
-    ESTRATEGIA:
-    1. Si todo entra en 1 JG → 1 viaje.
-    2. Si no, asignar la Sprinter primero (pedidos más pesados, priorizando Norte
-       + pedidos grandes CABA que no puedan ir en JG).
-    3. Distribuir el resto entre los JG disponibles (balanceado).
-    4. Si sobra algo y la Kangoo tiene capacidad → asignarla.
-    5. Si aún sobra → MB 608 / MB 1114.
-
-    Devuelve lista de tuplas (nombre_ruta, df_pedidos, trans_preferido)
+    Asigna pedidos a vehículos con la filosofía descripta arriba.
+    Devuelve lista de tuplas (corredor, df_pedidos, trans_preferido).
     """
     df = pedidos_df.copy()
-    resultado = []
+    if "_corredores_ok" not in df.columns:
+        df["_corredores_ok"] = df["zona"].apply(lambda z: corredores_de_localidad(z))
 
-    # ── Caso 1: todo el reparto entra en un utilitario ────
+    # ── Atajo: todo en 1 JG ──────────────────────────────
     kg_total = df["kilos"].sum()
     n_total  = len(df)
     if kg_total <= 600 and n_total <= MAX_PARADAS:
-        zonas_u = df["zona"].unique().tolist()
-        zonas_gaby = [z for z in zonas_u if ZONAS_TRANS.get(z, "") == "Gaby"]
-        trans = "Gaby" if zonas_gaby else "Juan"
-        nombre = " + ".join(sorted(set(zonas_u))) if len(zonas_u) > 1 else zonas_u[0]
-        return [(nombre, df, trans)]
+        corr = _elegir_corredor_para_pedidos(df) or "CABA"
+        return [(corr, df.drop(columns=["_corredores_ok"], errors="ignore"), "Juan")]
 
-    # ── Preparar listas de JG disponibles y vehículos Greco ──
-    jg_disponibles = [n for n in ["Gaby", "Juan", "Ezequiel"]
-                      if n in transportes_df["nombre"].values]
-    greco_disponibles = [v for v in FLOTA_GRECO
-                         if v in transportes_df["nombre"].values]
+    # ── Preparar flota ───────────────────────────────────
+    flota = _flota_ordenada(transportes_df)
+    # "bins": slots de carga por vehículo  (puede haber varios slots por extra)
+    bins  = []  # {veh: dict, ids: [], kg: 0.0}
 
-    # ── Paso 1: asignar Sprinter ──────────────────────────
-    # La Sprinter lleva: primero los pedidos de zonas Greco (Norte, Acceso Oeste)
-    # que no pueden ir en JG, más los pedidos CABA más pesados hasta llenar.
-    sprinter_cap = 0
-    sprinter_nom = None
-    if greco_disponibles:
-        sprinter_nom = greco_disponibles[0]
-        sprinter_cap = float(_trans_row(sprinter_nom, transportes_df)["capacidad_kg"])
+    def _nuevo_bin(veh):
+        return {"veh": veh, "ids": [], "kg": 0.0}
 
-    # Separar pedidos por prioridad para la Sprinter:
-    # Prioridad A: zonas que NO son JG (Norte, Acceso Oeste, etc.)
-    zonas_no_jg = [z for z in df["zona"].unique()
-                   if ZONAS_TRANS.get(z, "") not in jg_disponibles + ["Gaby","Juan","Ezequiel"]]
-    peds_no_jg = df[df["zona"].isin(zonas_no_jg)].sort_values("cp")
-    peds_jg    = df[~df["zona"].isin(zonas_no_jg)].sort_values("kilos", ascending=False)
+    # Iniciar un bin por cada vehículo (uno a la vez hasta max_salidas)
+    salidas_usadas = {}
+    for v in flota:
+        salidas_usadas[v["nombre"]] = 0
+        bins.append(_nuevo_bin(v))
 
-    # Armar carga de la Sprinter: primero los de zona no-JG, luego los pesados de JG
-    sprinter_idx = []
-    sprinter_kg  = 0.0
+    # ── Asignación: first-fit decreasing ─────────────────
+    # Ordenar pedidos por kg desc
+    todos = df.sort_values("kilos", ascending=False)
 
-    if sprinter_nom:
-        for _, p in peds_no_jg.iterrows():
-            if sprinter_kg + p["kilos"] <= sprinter_cap and len(sprinter_idx) < MAX_PARADAS:
-                sprinter_idx.append(p.name)
-                sprinter_kg += p["kilos"]
+    def _puede_entrar(b, kg_p):
+        cap = b["veh"]["cap"]
+        return (b["kg"] + kg_p <= cap and len(b["ids"]) < MAX_PARADAS)
 
-        # Completar Sprinter con los más pesados de JG hasta llegar a ~90% de carga
-        for _, p in peds_jg.iterrows():
-            espacio_restante = sprinter_cap - sprinter_kg
-            # Solo agregar pedidos pesados que valen la pena en la Sprinter
-            if (espacio_restante >= p["kilos"] and
-                len(sprinter_idx) < MAX_PARADAS and
-                p["kilos"] >= 150):  # solo pedidos ≥150kg van al camión
-                sprinter_idx.append(p.name)
-                sprinter_kg += p["kilos"]
+    sobrantes_idx = []
+    for _, p in todos.iterrows():
+        pid  = p.name
+        kg_p = p["kilos"]
+        colocado = False
 
-    df_sprinter    = df.loc[sprinter_idx] if sprinter_idx else pd.DataFrame(columns=df.columns)
-    df_resto       = df.drop(index=sprinter_idx)
+        # Buscar bin que lo acepte:
+        # Prioridad: el bin más cargado que aún tenga espacio (para llegar al 75%)
+        candidatos = [b for b in bins if _puede_entrar(b, kg_p)]
+        # Ordenar: primero los más llenos (para consolidar)
+        candidatos.sort(key=lambda b: -b["kg"])
 
-    if not df_sprinter.empty:
-        zonas_s = df_sprinter["zona"].unique()
-        nombre  = " + ".join(sorted(set(zonas_s))) if len(zonas_s) > 1 else zonas_s[0]
-        resultado.append((nombre, df_sprinter, sprinter_nom))
+        for b in candidatos:
+            b["ids"].append(pid)
+            b["kg"] += kg_p
+            colocado = True
+            break
 
-    # ── Paso 2: distribuir el resto entre JG (balanceado por kg) ──
-    if not df_resto.empty:
-        # Distribuir el resto entre los JG de forma balanceada.
-        # Estrategia: primero ordena los pedidos de MAYOR a MENOR kg,
-        # luego asigna cada uno al JG que tiene MENOS carga acumulada
-        # (garantiza balance), respetando capacidad y MAX_PARADAS.
-        df_resto_sorted = df_resto.sort_values("kilos", ascending=False)
+        if not colocado:
+            # No cabe en ningún bin disponible → abrir un bin extra si existe veh extra
+            for v in [v for v in flota if v["tipo"] == "greco_extra"]:
+                if v["cap"] >= kg_p:
+                    nb = _nuevo_bin(v)
+                    nb["ids"].append(pid)
+                    nb["kg"] += kg_p
+                    bins.append(nb)
+                    colocado = True
+                    break
+            if not colocado:
+                sobrantes_idx.append(pid)
 
-        jg_rutas = {nom: {"peds": [], "kg": 0.0} for nom in jg_disponibles}
-        sin_asignar = []
+    # ── Consolidar: eliminar bins que no lleguen al 75% ──
+    # Si un bin está bajo el umbral, redistribuir sus pedidos en otros bins
+    # Iterar hasta estabilidad
+    cambio = True
+    while cambio:
+        cambio = False
+        bins_activos = [b for b in bins if b["ids"]]
+        bins_activos.sort(key=lambda b: b["kg"])  # el más vacío primero
 
-        for _, p in df_resto_sorted.iterrows():
-            # Asignar al JG con MENOS carga que aún tenga capacidad
-            candidatos = [
-                (jg_rutas[nom]["kg"], nom)
-                for nom in jg_disponibles
-                if (600 - jg_rutas[nom]["kg"] >= p["kilos"] and
-                    len(jg_rutas[nom]["peds"]) < MAX_PARADAS)
-            ]
-            if candidatos:
-                # El de menos carga
-                _, mejor = min(candidatos)
-                jg_rutas[mejor]["peds"].append(p.name)
-                jg_rutas[mejor]["kg"] += p["kilos"]
-            else:
-                sin_asignar.append(p.name)
+        for b_vacio in bins_activos:
+            pct = b_vacio["kg"] / b_vacio["veh"]["cap"]
+            if pct >= CARGA_MINIMA_PCT:
+                continue  # ya bien cargado, no tocar
+            # Intentar mover todos sus pedidos a otros bins
+            peds_del_bin = list(b_vacio["ids"])  # copia
+            otros = [ob for ob in bins if ob is not b_vacio and ob["ids"]]
+            otros.sort(key=lambda ob: -ob["kg"])  # los más llenos primero
 
-        for nom in jg_disponibles:
-            peds_idx = jg_rutas[nom]["peds"]
-            if peds_idx:
-                # Ordenar los pedidos por CP para recorrido lógico
-                df_jg = df.loc[peds_idx].sort_values("cp")
-                zonas_j = df_jg["zona"].unique()
-                nombre  = " + ".join(sorted(set(zonas_j))) if len(zonas_j) > 1 else zonas_j[0]
-                resultado.append((nombre, df_jg, nom))
+            movidos = []
+            for pid in sorted(peds_del_bin, key=lambda x: -df.loc[x, "kilos"]):
+                kg_p = df.loc[pid, "kilos"]
+                for ob in otros:
+                    if _puede_entrar(ob, kg_p):
+                        ob["ids"].append(pid)
+                        ob["kg"] += kg_p
+                        movidos.append(pid)
+                        break
 
-        # ── Paso 3: sobrantes → Kangoo / MB 608 ──────────
-        if sin_asignar:
-            df_sin = df.loc[sin_asignar]
-            kg_sin = df_sin["kilos"].sum()
+            if len(movidos) == len(peds_del_bin):
+                # Todos se pudieron mover → vaciar este bin
+                b_vacio["ids"] = []
+                b_vacio["kg"]  = 0.0
+                cambio = True
+                break  # reiniciar el while
 
-            # Intentar con el segundo vehículo Greco (Kangoo)
-            kangoo_nom = greco_disponibles[1] if len(greco_disponibles) > 1 else None
-            if kangoo_nom:
-                kangoo_cap = float(_trans_row(kangoo_nom, transportes_df)["capacidad_kg"])
-                if kg_sin <= kangoo_cap and len(sin_asignar) <= MAX_PARADAS:
-                    zonas_k = df_sin["zona"].unique()
-                    nombre  = " + ".join(sorted(set(zonas_k))) if len(zonas_k) > 1 else zonas_k[0]
-                    resultado.append((nombre, df_sin, kangoo_nom))
-                else:
-                    # Si no entra en la Kangoo, usar MB 608 / MB 1114
-                    greco_rows = transportes_df[transportes_df["nombre"].str.startswith("Greco")]
-                    greco_rows = greco_rows.sort_values("capacidad_kg")
-                    grande = greco_rows[greco_rows["capacidad_kg"] >= kg_sin]
-                    t_nom = str(grande.iloc[0]["nombre"]) if not grande.empty else "Greco - MB 1114"
-                    zonas_k = df_sin["zona"].unique()
-                    nombre  = " + ".join(sorted(set(zonas_k))) if len(zonas_k) > 1 else zonas_k[0]
-                    resultado.append((nombre, df_sin, t_nom))
-            else:
-                # Solo hay Sprinter, usar MB
-                greco_rows = transportes_df[transportes_df["nombre"].str.startswith("Greco")]
-                grande = greco_rows[greco_rows["capacidad_kg"] >= kg_sin].sort_values("capacidad_kg")
-                t_nom  = str(grande.iloc[0]["nombre"]) if not grande.empty else "Greco - MB 1114"
-                zonas_k = df_sin["zona"].unique()
-                nombre  = " + ".join(sorted(set(zonas_k))) if len(zonas_k) > 1 else zonas_k[0]
-                resultado.append((nombre, df_sin, t_nom))
+    # ── Sobrantes → último recurso ────────────────────────
+    if sobrantes_idx:
+        kg_sob = sum(df.loc[pid, "kilos"] for pid in sobrantes_idx)
+        greco_rows = transportes_df[transportes_df["nombre"].str.startswith("Greco")]
+        greco_rows = greco_rows.sort_values("capacidad_kg")
+        cand = greco_rows[greco_rows["capacidad_kg"] >= kg_sob]
+        trans = str(cand.iloc[0]["nombre"]) if not cand.empty else "Greco - MB 1114"
+        df_sob = df.loc[sobrantes_idx]
+        corr_s = _elegir_corredor_para_pedidos(df_sob) or "Varios"
+        yield_extra = [(corr_s, df_sob.drop(columns=["_corredores_ok"], errors="ignore"), trans)]
+    else:
+        yield_extra = []
 
+    # ── Emitir rutas ─────────────────────────────────────
+    resultado = []
+    for b in bins:
+        if not b["ids"]: continue
+        df_r = df.loc[b["ids"]].sort_values("cp")
+        corr = _elegir_corredor_para_pedidos(df_r) or "Varios"
+        resultado.append((corr, df_r.drop(columns=["_corredores_ok"], errors="ignore"), b["veh"]["nombre"]))
+
+    resultado.extend(yield_extra)
     return resultado
 
 

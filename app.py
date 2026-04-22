@@ -657,42 +657,76 @@ def _consolidar_zonas(pedidos_df, transportes_df):
         salidas_usadas[v["nombre"]] = 0
         bins.append(_nuevo_bin(v))
 
-    # ── Asignación: first-fit decreasing ─────────────────
-    # Ordenar pedidos por kg desc
-    todos = df.sort_values("kilos", ascending=False)
+    # ── Pre-agrupado por dirección idéntica ──────────────
+    # Pedidos con la MISMA dirección física deben ir SIEMPRE en el mismo bin.
+    # Los agrupamos primero y los tratamos como una unidad inseparable.
+
+    def _norm_dir(d):
+        """Normaliza dirección para comparar: minúsculas, sin comas extras."""
+        import re
+        d = str(d).lower().strip()
+        # Quitar provincia, país
+        for t in [", buenos aires, argentina", ", ciudad autonoma de buenos aires, argentina",
+                  ", argentina", ", buenos aires"]:
+            d = d.replace(t, "")
+        # Quitar espacios y comas redundantes
+        d = re.sub(r"[, ]+", " ", d).strip()
+        return d
+
+    # Construir grupos por dirección normalizada
+    dir_groups = {}  # {dir_norm: [idx_df, ...]}
+    for idx, row in df.iterrows():
+        key = _norm_dir(row["direccion"])
+        dir_groups.setdefault(key, []).append(idx)
+
+    # Crear "super-pedidos" por grupo (se asignan juntos o no se asignan)
+    units = []  # cada unit: [lista de idx_df], kg_total, tipo="group"|"single"
+    for key, idxs in dir_groups.items():
+        kg = df.loc[idxs, "kilos"].sum()
+        units.append({"idxs": idxs, "kg": kg})
+
+    # Ordenar units por kg desc (first-fit decreasing)
+    units.sort(key=lambda u: -u["kg"])
 
     def _puede_entrar(b, kg_p):
         cap = b["veh"]["cap"]
-        return (b["kg"] + kg_p <= cap and len(b["ids"]) < MAX_PARADAS)
+        return (b["kg"] + kg_p <= cap and
+                len(b["ids"]) + 1 <= MAX_PARADAS)  # al menos 1 slot libre
+
+    def _puede_entrar_grupo(b, kg_total, n_peds):
+        cap = b["veh"]["cap"]
+        return (b["kg"] + kg_total <= cap and
+                len(b["ids"]) + n_peds <= MAX_PARADAS)
 
     sobrantes_idx = []
-    for _, p in todos.iterrows():
-        pid  = p.name
-        kg_p = p["kilos"]
+    for unit in units:
+        idxs   = unit["idxs"]
+        kg_u   = unit["kg"]
+        n_u    = len(idxs)
         colocado = False
 
-        # Buscar bin que lo acepte:
-        # Prioridad: el bin más cargado que aún tenga espacio (para llegar al 75%)
-        candidatos = [b for b in bins if _puede_entrar(b, kg_p)]
-        # Ordenar: primero los más llenos (para consolidar)
-        candidatos.sort(key=lambda b: -b["kg"])
+        # Buscar bin que acepte TODO el grupo junto
+        candidatos = [b for b in bins if _puede_entrar_grupo(b, kg_u, n_u)]
+        candidatos.sort(key=lambda b: -b["kg"])  # más lleno primero
 
         for b in candidatos:
-            b["ids"].append(pid)
-            b["kg"] += kg_p
+            b["ids"].extend(idxs)
+            b["kg"] += kg_u
             colocado = True
             break
 
         if not colocado:
-            # No cabe en ningún bin disponible → abrir un bin extra si existe veh extra
+            # Abrir bin extra si existe
             for v in [v for v in flota if v["tipo"] == "greco_extra"]:
-                if v["cap"] >= kg_p:
+                if v["cap"] >= kg_u and n_u <= MAX_PARADAS:
                     nb = _nuevo_bin(v)
-                    nb["ids"].append(pid)
-                    nb["kg"] += kg_p
+                    nb["ids"].extend(idxs)
+                    nb["kg"] += kg_u
                     bins.append(nb)
                     colocado = True
                     break
+            if not colocado:
+                sobrantes_idx.extend(idxs)
             if not colocado:
                 sobrantes_idx.append(pid)
 
@@ -1296,28 +1330,48 @@ def _render_widget_drag_and_drop(rutas):
   .ped-zona-tag.oeste  { background:#ffedd5; color:#9a3412; }
   .ped-zona-tag.noroeste { background:#fce7f3; color:#9d174d; }
   .ped-zona-tag.cabasur  { background:#e0f2fe; color:#0c4a6e; }
-  .ped-loc {
-    font-size: 13px;
-    font-weight: 700;
-    color: #111;
-    margin-bottom: 2px;
-    user-select: text;
-    cursor: text;
+  /* Fila superior: dirección grande a la izq, zona+valor a la der */
+  .ped-top-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 10px;
+    margin-bottom: 4px;
+  }
+  .ped-right-top {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    flex-shrink: 0;
+    gap: 2px;
   }
   .ped-dir {
-    font-size: 12px;
-    font-weight: 400;
-    color: #374151;
-    line-height: 1.35;
+    font-size: 15px;
+    font-weight: 700;
+    color: #111;
+    line-height: 1.3;
     user-select: text;
     cursor: text;
+    flex: 1;
+  }
+  .ped-loc {
+    font-size: 12px;
+    font-weight: 500;
+    color: #4b5563;
     margin-bottom: 2px;
+    user-select: text;
+    cursor: text;
   }
   .ped-cli {
     font-size: 11px;
-    color: #6b7280;
+    color: #9ca3af;
     user-select: text;
     cursor: text;
+  }
+  .ped-val {
+    font-size: 12px;
+    font-weight: 600;
+    color: #374151;
   }
   .ped-stats {
     display: flex; justify-content: space-between; margin-top: 6px;
@@ -1411,27 +1465,30 @@ function render() {
         }[p.zona] || "";
 
         // Limpiar la dirección: quitar partes genéricas de Google Maps
-        const dirClean = p.dir
-          .replace(/, Ciudad Autónoma de Buenos Aires, Argentina/gi, "")
-          .replace(/, Ciudad Autonoma de Buenos Aires, Argentina/gi, "")
-          .replace(/, Buenos Aires, Argentina/gi, "")
-          .replace(/, Argentina/gi, "")
-          .replace(/[, ]+/g, ", ")   // normalizar separadores
-          .replace(/,$/, "")      // quitar coma final
-          .trim();
+        const dirClean = (function(d) {
+          return d
+            .replace(/, Ciudad Aut[oó]noma de Buenos Aires, Argentina/gi, "")
+            .replace(/, Buenos Aires, Argentina/gi, "")
+            .replace(/, Argentina/gi, "")
+            // Quitar comas vacías consecutivas: ", , , ," → ""
+            .replace(/(, *){2,}/g, ", ")
+            .replace(/^[, ]+|[, ]+$/g, "")
+            .trim();
+        })(p.dir);
 
         ped.innerHTML = `
           <div class="ped-handle" draggable="true" title="Arrastrar para mover">⋮⋮</div>
           <div class="ped-body">
-            <span class="ped-zona-tag ${zonaCls}">${p.zona}</span>
-            <div class="ped-loc">${p.loc || p.zona}</div>
-            <div class="ped-dir">${dirClean}</div>
-            <div class="ped-cli">${p.cli} · #${p.id} · CP ${p.cp}</div>
-            <div class="ped-stats">
-              <span class="ped-kg">${p.kg.toFixed(0)} kg · ${p.btos} btos</span>
-              <span class="ped-val">$${fmt(p.val)}</span>
-              <span class="ped-imp" style="color:${im.col}">${p.imp.toFixed(2)}%</span>
+            <div class="ped-top-row">
+              <div class="ped-dir">${dirClean}</div>
+              <div class="ped-right-top">
+                <span class="ped-zona-tag ${zonaCls}">${p.zona}</span>
+                <div class="ped-val">$${fmt(p.val)}</div>
+                <div class="ped-imp" style="color:${im.col}">${p.imp.toFixed(2)}%</div>
+              </div>
             </div>
+            <div class="ped-loc">${p.loc || p.zona}</div>
+            <div class="ped-cli">${p.cli} · #${p.id} · CP ${p.cp} · ${p.kg.toFixed(0)} kg · ${p.btos} btos</div>
           </div>
         `;
         // Drag SOLO desde el handle

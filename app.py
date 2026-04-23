@@ -1172,177 +1172,159 @@ def sidebar_config():
 # ══════════════════════════════════════════════════════════
 # MAIN
 # ══════════════════════════════════════════════════════════
-def _render_panel_interactivo(rutas):
-    """
-    Panel nativo Streamlit para mover pedidos entre rutas y reordenar el recorrido.
-    Usa session_state para persistir movimientos y orden sin necesidad de iframe.
-    """
-    if not rutas:
-        return
+def _render_widget_drag_and_drop(rutas):
+    """Widget HTML con drag & drop — versión que funciona en Streamlit Cloud."""
+    import streamlit.components.v1 as components
+    import html as html_mod
 
-    n = len(rutas)
-
-    # ── Inicializar orden y asignaciones en session_state ──────────────────
-    if "orden_peds" not in st.session_state:
-        # orden_peds: {ruta_id: [lista de ids en orden de recorrido]}
-        st.session_state["orden_peds"] = {
-            r["id"]: [p["id"] for p in r["peds"]] for r in rutas
-        }
-
-    # Sincronizar: si el ruteo cambió (nuevo archivo), resetear orden
-    ids_rutas_actuales = {r["id"] for r in rutas}
-    ids_rutas_guardadas = set(st.session_state["orden_peds"].keys())
-    if ids_rutas_actuales != ids_rutas_guardadas:
-        st.session_state["orden_peds"] = {
-            r["id"]: [p["id"] for p in r["peds"]] for r in rutas
-        }
-
-    # Construir índice global pedido_id → objeto pedido
-    ped_idx = {}
-    for r in rutas:
+    rutas_js = []
+    for i, r in enumerate(rutas):
+        peds_js = []
         for p in r["peds"]:
-            ped_idx[p["id"]] = (p, r["id"])
+            dir_str = str(p["direccion"])
+            localidad_real = (
+                str(p.get("localidad", "")).strip()
+                or str(p.get("zona", "")).strip()
+                or ""
+            )
+            corrs_p = corredores_de_localidad(localidad_real)
+            corr_macro = min(corrs_p, key=lambda c: CORREDORES_SIZE.get(c, 999)) if corrs_p else ""
+            MACRO = {"Norte 1":"Norte","Norte 2":"Norte","Noroeste 1":"Noroeste",
+                     "Noroeste 2":"Noroeste","Oeste":"Oeste","Norte-CABA-Sur":"CABA-Sur",
+                     "Sur 1":"Sur","CABA":"CABA"}
+            zona_label = MACRO.get(corr_macro, corr_macro)
+            peds_js.append({
+                "id": str(p["id"]), "dir": dir_str, "cli": str(p["cliente"]),
+                "zona": zona_label, "loc": localidad_real,
+                "cp": int(p["cp"]), "kg": float(p["kilos"]),
+                "btos": int(p["bultos"]), "val": float(p["valor"]),
+                "imp": float(p["imp_ped"]),
+            })
+        rutas_js.append({
+            "idx": i, "ruta_id": str(r["id"]),
+            "nombre": f"R{i+1}", "transp": str(r["transportista"]),
+            "zona": str(r["zona"]),
+            "veh": str(r["vehiculo"]).replace("Greco - ", ""),
+            "cap_kg": float(r["cap_kg"]), "kg_total": float(r["kg_total"]),
+            "val_total": float(r["val_total"]), "flete": float(r["flete"]),
+            "impacto": float(r["impacto"]), "pct_carga": float(r["pct_carga"]),
+            "n_paradas": int(r["n_paradas"]), "ayudante": bool(r["ayudante"]),
+            "peds": peds_js,
+        })
 
-    # Construir índice ruta_id → ruta
-    ruta_idx = {r["id"]: r for r in rutas}
+    rutas_json = json.dumps(rutas_js, ensure_ascii=False)
+    height = max(500, 250 + 100 * max(r["n_paradas"] for r in rutas))
 
-    ZONA_COLORS = {
-        "Sur": "#16a34a", "Norte": "#d97706", "CABA": "#7c3aed",
-        "Oeste": "#ea580c", "Noroeste": "#db2777", "CABA-Sur": "#0284c7",
-    }
+    html = """
+<!DOCTYPE html><html><head><style>
+*{box-sizing:border-box;margin:0;padding:0;font-family:-apple-system,sans-serif}
+body{background:transparent}
+.panel{display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:12px}
+.ruta{border:1px solid #e5e7eb;border-radius:12px;background:#fff;overflow:hidden;display:flex;flex-direction:column;min-height:160px}
+.ruta.drag-over{border:2px solid #2563eb;background:#eff6ff}
+.ruta-head{padding:10px 14px;background:#f9fafb;border-bottom:1px solid #e5e7eb}
+.ruta-title{font-size:14px;font-weight:600;color:#111}
+.badge{display:inline-block;padding:2px 8px;border-radius:99px;font-size:10px;font-weight:600;margin-left:4px}
+.b-green{background:#dcfce7;color:#166534}.b-yellow{background:#fef9c3;color:#854d0e}
+.b-red{background:#fee2e2;color:#991b1b}.b-blue{background:#dbeafe;color:#1e40af}.b-gray{background:#f3f4f6;color:#374151}
+.stats{display:flex;flex-wrap:wrap;gap:10px;font-size:11px;color:#6b7280;margin-top:6px}
+.stats b{color:#111}
+.bar{height:4px;background:#e5e7eb;border-radius:2px;margin-top:6px;overflow:hidden}
+.bar>div{height:100%;border-radius:2px;transition:width .3s}
+.peds-zone{flex:1;padding:8px;min-height:80px;display:flex;flex-direction:column;gap:6px}
+.ped{display:flex;background:#fafafa;border:1px solid #e5e7eb;border-radius:8px;overflow:hidden;transition:box-shadow .15s,opacity .15s;cursor:grab}
+.ped:hover{box-shadow:0 2px 8px rgba(0,0,0,.1);border-color:#9ca3af}
+.ped:active{cursor:grabbing}
+.ped.dragging{opacity:.25;box-shadow:none}
+.ped-handle{flex-shrink:0;padding:10px 8px;background:#f3f4f6;color:#9ca3af;user-select:none;display:flex;align-items:center;font-size:14px;border-right:1px solid #e5e7eb;letter-spacing:-1px}
+.ped:hover .ped-handle{background:#e5e7eb;color:#374151}
+.ped-body{flex:1;padding:8px 10px;min-width:0}
+.ped-top-row{display:flex;justify-content:space-between;align-items:flex-start;gap:8px;margin-bottom:3px}
+.ped-left{flex:1;min-width:0}
+.ped-dir-row{display:flex;align-items:baseline;gap:6px;flex-wrap:wrap}
+.ped-dir{font-size:15px;font-weight:700;color:#111;line-height:1.3}
+.ped-kg-big{font-size:14px;font-weight:700;color:#374151;white-space:nowrap;flex-shrink:0}
+.ped-right-top{display:flex;flex-direction:column;align-items:flex-end;flex-shrink:0;gap:2px}
+.ped-val{font-size:12px;font-weight:600;color:#374151}
+.ped-loc{font-size:12px;font-weight:600;color:#374151;margin-top:2px}
+.ped-cli{font-size:11px;color:#9ca3af;margin-top:3px}
+.ped-zona-tag{display:inline-block;padding:1px 7px;border-radius:99px;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;margin-right:5px}
+.ped-zona-tag.sur{background:#dcfce7;color:#166534}.ped-zona-tag.norte{background:#fef9c3;color:#854d0e}
+.ped-zona-tag.caba{background:#ede9fe;color:#5b21b6}.ped-zona-tag.oeste{background:#ffedd5;color:#9a3412}
+.ped-zona-tag.noroeste{background:#fce7f3;color:#9d174d}.ped-zona-tag.cabasur{background:#e0f2fe;color:#0c4a6e}
+.empty-msg{text-align:center;padding:20px;color:#9ca3af;font-size:12px;font-style:italic;border:2px dashed #e5e7eb;border-radius:8px}
+</style></head><body>
+<div id="panel" class="panel"></div>
+<script>
+const RUTAS=__RUTAS_JSON__;
+function impColor(v){if(v<=3)return{cls:"b-green",col:"#16a34a"};if(v<=5)return{cls:"b-yellow",col:"#d97706"};return{cls:"b-red",col:"#dc2626"};}
+function cargaColor(p){if(p>=75)return"#16a34a";if(p>=45)return"#d97706";return"#dc2626";}
+function fmt(n){return Math.round(n).toLocaleString("es-AR");}
+function cleanDir(d){return d.replace(/, Ciudad Aut[oó]noma de Buenos Aires, Argentina/gi,"").replace(/, Buenos Aires, Argentina/gi,"").replace(/, Argentina/gi,"").replace(/(, *){2,}/g,", ").replace(/^[, ]+|[, ]+$/g,"").trim();}
 
-    def imp_color(v):
-        if v <= 3:   return "#16a34a"
-        if v <= 5:   return "#d97706"
-        return "#dc2626"
-
-    def clean_dir(d):
-        import re
-        d = re.sub(r", Ciudad Aut[oó]noma de Buenos Aires, Argentina", "", d, flags=re.I)
-        d = re.sub(r", Buenos Aires, Argentina", "", d, flags=re.I)
-        d = re.sub(r", Argentina", "", d, flags=re.I)
-        d = re.sub(r"(, *){2,}", ", ", d)
-        return d.strip().strip(",").strip()
-
-    # ── Renderizar cada ruta en una columna ────────────────────────────────
-    cols = st.columns(n)
-
-    for col_i, r in enumerate(rutas):
-        rid  = r["id"]
-        pct  = r["pct_carga"]
-        imp  = r["impacto"]
-        ic   = imp_color(imp)
-        bar_color = "#16a34a" if pct >= 75 else "#d97706" if pct >= 45 else "#dc2626"
-
-        with cols[col_i]:
-            # ── Cabecera de ruta ──────────────────────────────────────────
-            st.markdown(f"""
-<div style="border:1px solid #e5e7eb;border-radius:10px;padding:10px 12px;
-            background:#f9fafb;margin-bottom:8px">
-  <div style="display:flex;justify-content:space-between;align-items:center">
-    <div>
-      <span style="font-size:13px;font-weight:700;color:#111">{r['transportista']}</span>
-      <span style="font-size:11px;color:#6b7280;margin-left:6px">{r['zona']}</span>
+function render(){
+ const panel=document.getElementById("panel");panel.innerHTML="";
+ RUTAS.forEach((r,ri)=>{
+  const imp=impColor(r.impacto),cc=cargaColor(r.pct_carga);
+  const ay=r.ayudante?'<span class="badge b-yellow">+ Ay.</span>':'';
+  const ruta=document.createElement("div");ruta.className="ruta";ruta.dataset.idx=ri;
+  ruta.innerHTML=`
+   <div class="ruta-head">
+    <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:4px">
+     <div><span class="ruta-title">${r.transp}</span><span class="badge b-blue">${r.zona}</span><span class="badge b-gray">${r.veh}</span>${ay}</div>
+     <span class="badge ${imp.cls}" style="font-size:13px">${r.impacto.toFixed(2)}%</span>
     </div>
-    <span style="font-size:13px;font-weight:700;color:{ic}">{imp:.2f}%</span>
-  </div>
-  <div style="font-size:11px;color:#6b7280;margin-top:4px">
-    {r['n_paradas']} paradas · <b style="color:#111">{r['kg_total']:.0f}</b>/{r['cap_kg']:.0f} kg ·
-    <span style="color:{bar_color};font-weight:600">{pct:.0f}%</span> ·
-    Flete <b>${r['flete']:,.0f}</b>
-  </div>
-  <div style="height:4px;background:#e5e7eb;border-radius:2px;margin-top:6px">
-    <div style="width:{min(pct,100):.0f}%;height:100%;background:{bar_color};border-radius:2px"></div>
-  </div>
-</div>
-""", unsafe_allow_html=True)
-
-            # ── Pedidos en orden ──────────────────────────────────────────
-            orden = st.session_state["orden_peds"].get(rid, [p["id"] for p in r["peds"]])
-            # Filtrar IDs que realmente están en esta ruta
-            orden = [pid for pid in orden if pid in ped_idx and ped_idx[pid][1] == rid]
-
-            for pos, pid in enumerate(orden):
-                p, _ = ped_idx[pid]
-                zona_label = p.get("zona", "")
-                zona_color = ZONA_COLORS.get(zona_label, "#374151")
-                loc        = p.get("localidad", p.get("zona", ""))
-                ic_p       = imp_color(p.get("imp_ped", 0))
-                dir_str    = clean_dir(str(p.get("direccion", "")))
-
-                # Tarjeta del pedido
-                st.markdown(f"""
-<div style="border:1px solid #e5e7eb;border-radius:8px;padding:10px 12px;
-            background:#fff;margin-bottom:6px">
-  <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px">
-    <div style="flex:1;min-width:0">
-      <div style="display:flex;align-items:baseline;gap:6px;flex-wrap:wrap">
-        <span style="font-size:15px;font-weight:700;color:#111;line-height:1.3">{dir_str}</span>
-        <span style="font-size:14px;font-weight:700;color:#374151;white-space:nowrap">{p.get('kilos',0):.0f} kg</span>
-      </div>
-      <div style="margin-top:3px">
-        <span style="background:{zona_color}22;color:{zona_color};font-size:10px;
-                     font-weight:700;padding:1px 7px;border-radius:99px;
-                     text-transform:uppercase;margin-right:5px">{zona_label}</span>
-        <span style="font-size:12px;font-weight:600;color:#374151">{loc}</span>
-      </div>
-      <div style="font-size:11px;color:#9ca3af;margin-top:2px">
-        {p.get('cliente','')} · #{pid} · CP {p.get('cp','')} · {p.get('bultos',0)} btos
-      </div>
+    <div class="stats">
+     <span>${r.n_paradas} par.</span><span><b>${fmt(r.kg_total)} kg</b> / ${fmt(r.cap_kg)} kg</span>
+     <span style="color:${cc};font-weight:600">${r.pct_carga.toFixed(0)}% carga</span>
+     <span>Flete <b>$${fmt(r.flete)}</b></span><span>Merc. <b>$${fmt(r.val_total)}</b></span>
     </div>
-    <div style="text-align:right;flex-shrink:0">
-      <div style="font-size:12px;font-weight:600;color:#374151">${p.get('valor',0):,.0f}</div>
-      <div style="font-size:12px;font-weight:700;color:{ic_p}">{p.get('imp_ped',0):.2f}%</div>
-    </div>
-  </div>
-</div>
-""", unsafe_allow_html=True)
-
-                # Controles: reordenar + mover a otra ruta
-                c1, c2, c3, c4 = st.columns([1, 1, 1, 3])
-
-                with c1:
-                    if pos > 0:
-                        if st.button("↑", key=f"up_{rid}_{pid}", help="Subir en el recorrido"):
-                            o = st.session_state["orden_peds"][rid]
-                            i = o.index(pid)
-                            o[i], o[i-1] = o[i-1], o[i]
-                            st.rerun()
-                with c2:
-                    if pos < len(orden) - 1:
-                        if st.button("↓", key=f"dn_{rid}_{pid}", help="Bajar en el recorrido"):
-                            o = st.session_state["orden_peds"][rid]
-                            i = o.index(pid)
-                            o[i], o[i+1] = o[i+1], o[i]
-                            st.rerun()
-                with c3:
-                    otras = [f"R{j+1}·{rutas[j]['transportista'][:8]}"
-                             for j, ro in enumerate(rutas) if ro["id"] != rid]
-                    if otras:
-                        dest_label = st.selectbox(
-                            "→", otras,
-                            key=f"sel_{rid}_{pid}",
-                            label_visibility="collapsed"
-                        )
-                with c4:
-                    otras_ids = [ro["id"] for ro in rutas if ro["id"] != rid]
-                    if otras_ids and st.button("Mover", key=f"mv_{rid}_{pid}",
-                                               type="primary",
-                                               use_container_width=True):
-                        # Determinar ruta destino
-                        dest_idx_label = otras.index(dest_label)
-                        dest_rid = otras_ids[dest_idx_label]
-                        # Actualizar asign_man
-                        st.session_state["asign_man"][pid] = dest_rid
-                        # Actualizar orden_peds: quitar de origen, agregar a destino
-                        if rid in st.session_state["orden_peds"]:
-                            st.session_state["orden_peds"][rid] = [
-                                x for x in st.session_state["orden_peds"][rid] if x != pid
-                            ]
-                        if dest_rid not in st.session_state["orden_peds"]:
-                            st.session_state["orden_peds"][dest_rid] = []
-                        st.session_state["orden_peds"][dest_rid].append(pid)
-                        st.rerun()
+    <div class="bar"><div style="width:${Math.min(r.pct_carga,100)}%;background:${cc}"></div></div>
+    <div class="bar" style="margin-top:3px"><div style="width:${Math.min(r.impacto/8*100,100)}%;background:${imp.col}"></div></div>
+   </div>
+   <div class="peds-zone" id="zone-${ri}" data-idx="${ri}"></div>`;
+  const zone=ruta.querySelector(".peds-zone");
+  if(!r.peds.length){zone.innerHTML='<div class="empty-msg">Soltá pedidos acá</div>';}
+  else{r.peds.forEach(p=>{
+   const im=impColor(p.imp);
+   const zonaCls={"Sur":"sur","Norte":"norte","CABA":"caba","Oeste":"oeste","Noroeste":"noroeste","CABA-Sur":"cabasur"}[p.zona]||"";
+   const dirClean=cleanDir(p.dir);
+   const ped=document.createElement("div");ped.className="ped";ped.draggable=true;
+   ped.innerHTML=`
+    <div class="ped-handle">⋮⋮</div>
+    <div class="ped-body">
+     <div class="ped-top-row">
+      <div class="ped-left">
+       <div class="ped-dir-row"><span class="ped-dir">${dirClean}</span><span class="ped-kg-big">${p.kg.toFixed(0)} kg</span></div>
+       <div class="ped-loc"><span class="ped-zona-tag ${zonaCls}">${p.zona}</span>${p.loc||p.zona}</div>
+      </div>
+      <div class="ped-right-top"><div class="ped-val">$${fmt(p.val)}</div><div style="font-size:13px;font-weight:700;color:${im.col}">${p.imp.toFixed(2)}%</div></div>
+     </div>
+     <div class="ped-cli">${p.cli} · #${p.id} · CP ${p.cp} · ${p.btos} btos</div>
+    </div>`;
+   ped.addEventListener("dragstart",(e)=>{e.dataTransfer.setData("pid",p.id);e.dataTransfer.setData("from",String(ri));ped.classList.add("dragging");});
+   ped.addEventListener("dragend",()=>{ped.classList.remove("dragging");});
+   zone.appendChild(ped);
+  });}
+  ruta.addEventListener("dragover",(e)=>{e.preventDefault();ruta.classList.add("drag-over");});
+  ruta.addEventListener("dragleave",()=>{ruta.classList.remove("drag-over");});
+  ruta.addEventListener("drop",(e)=>{
+   e.preventDefault();ruta.classList.remove("drag-over");
+   const pid=e.dataTransfer.getData("pid"),fromIdx=parseInt(e.dataTransfer.getData("from")),toIdx=ri;
+   if(fromIdx===toIdx||!pid)return;
+   const url=new URL(window.parent.location.href);
+   url.searchParams.set("move_pid",pid);url.searchParams.set("move_to_id",r.ruta_id);
+   url.searchParams.set("_t",String(Date.now()));
+   window.parent.location.href=url.toString();
+  });
+  panel.appendChild(ruta);
+ });
+}
+render();
+</script></body></html>
+"""
+    html = html.replace("__RUTAS_JSON__", rutas_json)
+    components.html(html, height=height, scrolling=True)
 
 
 def main():
@@ -1351,10 +1333,17 @@ def main():
     if "horas_man"    not in st.session_state: st.session_state["horas_man"]    = {}
     if "asign_man"    not in st.session_state: st.session_state["asign_man"]    = {}
     if "rutas_extra"  not in st.session_state: st.session_state["rutas_extra"]  = []
-    if "orden_peds"   not in st.session_state: st.session_state["orden_peds"]   = {}
 
-    # (Los movimientos de pedidos se manejan via session_state["asign_man"]
-    #  directamente desde _render_panel_interactivo — no se usan query params)
+    # Capturar query params del widget drag & drop
+    qp = st.query_params
+    if "move_pid" in qp and "move_to_id" in qp:
+        try:
+            pid     = str(qp["move_pid"])
+            ruta_id = str(qp["move_to_id"])
+            st.session_state["asign_man"][pid] = ruta_id
+        except Exception:
+            pass
+        st.query_params.clear()
 
     pedidos_df, trans_df = sidebar_config()
 
@@ -1476,7 +1465,6 @@ def main():
                 st.session_state["asign_man"]   = {}
                 st.session_state["rutas_extra"] = []
                 st.session_state["fletes_man"]  = {}
-                st.session_state["orden_peds"]  = {}
                 st.rerun()
 
         st.markdown("---")
@@ -1489,7 +1477,7 @@ def main():
             else:
                 st.success("✅ Todas las rutas están por debajo del 3%.")
 
-            _render_panel_interactivo(rutas)
+            _render_widget_drag_and_drop(rutas)
         else:
             st.info("No hay rutas generadas.")
 

@@ -812,47 +812,7 @@ def optimizar_rutas(pedidos_df, transportes_df, fletes_man, horas_man, asign_man
     asign_man = asign_man or {}
     rutas_extra = rutas_extra or []
 
-    # ── Si hay asignaciones manuales, usarlas. Si no, consolidar automáticamente ──
-    if asign_man:
-        # Agrupar pedidos por ruta_idx según asignación manual
-        grupos_dict = {}
-        pedidos_asignados = set()
-        for _, ped in pedidos_df.iterrows():
-            pid = str(ped.get("id", ""))
-            if pid in asign_man:
-                ridx = asign_man[pid]
-                grupos_dict.setdefault(ridx, []).append(ped)
-                pedidos_asignados.add(pid)
-
-        # Pedidos sin asignar → aplicar consolidación automática
-        peds_sin_asignar = pedidos_df[~pedidos_df["id"].astype(str).isin(pedidos_asignados)]
-        auto_grupos = _consolidar_zonas(peds_sin_asignar, transportes_df) if not peds_sin_asignar.empty else []
-
-        # Agregar rutas extra vacías (pueden ser int o dict)
-        extras_trans = {}  # {ridx: transportista}
-        for extra in rutas_extra:
-            if isinstance(extra, dict):
-                ridx = extra["idx"]
-                extras_trans[ridx] = extra.get("transportista")
-            else:
-                ridx = extra
-            grupos_dict.setdefault(ridx, [])
-
-        # Convertir a formato lista de (nombre, df, trans_preferido)
-        grupos = []
-        for ridx in sorted(grupos_dict.keys()):
-            peds_list = grupos_dict[ridx]
-            trans_pref = extras_trans.get(ridx)
-            if peds_list:
-                df_ruta = pd.DataFrame(peds_list)
-                zonas_ruta = df_ruta["zona"].unique()
-                nombre = " + ".join(sorted(set(zonas_ruta))) if len(zonas_ruta) > 1 else zonas_ruta[0]
-                grupos.append((f"R{ridx+1} · {nombre}", df_ruta, trans_pref))
-            else:
-                grupos.append((f"R{ridx+1} · (vacía)", pd.DataFrame(columns=pedidos_df.columns), trans_pref))
-        # Luego rutas automáticas del resto
-        grupos.extend(auto_grupos)
-    else:
+    if True:  # siempre ruteo automático primero, asign_man se aplica como post-proceso
         # _consolidar_zonas ya devuelve tuplas de 3 (nombre, df, trans_pref)
         grupos = _consolidar_zonas(pedidos_df, transportes_df)
         # Agregar rutas extra vacías
@@ -974,6 +934,54 @@ def optimizar_rutas(pedidos_df, transportes_df, fletes_man, horas_man, asign_man
                 "pct_carga":    kg_t / cap_kg * 100 if cap_kg > 0 else 0,
                 "peds":         peds_data,
             })
+
+    # ── Post-proceso: aplicar asignaciones manuales (drag & drop) ──
+    # asign_man = {pedido_id: ruta_id_destino}
+    # Mover el pedido de su ruta actual a la ruta destino
+    if asign_man:
+        # Construir mapa ruta_id → índice en rutas[]
+        id_a_idx = {r["id"]: i for i, r in enumerate(rutas)}
+
+        for pid_str, dest_ruta_id in asign_man.items():
+            dest_idx = id_a_idx.get(dest_ruta_id)
+            if dest_idx is None:
+                continue  # ruta destino no existe, ignorar
+
+            # Buscar el pedido en sus rutas actuales y moverlo
+            for src_idx, ruta in enumerate(rutas):
+                if src_idx == dest_idx:
+                    continue
+                peds_originales = ruta["peds"]
+                ped_a_mover = next((p for p in peds_originales if str(p["id"]) == pid_str), None)
+                if ped_a_mover is None:
+                    continue
+
+                # Quitar de la ruta origen
+                ruta["peds"] = [p for p in peds_originales if str(p["id"]) != pid_str]
+                ruta["kg_total"] -= ped_a_mover["kilos"]
+                ruta["val_total"] -= ped_a_mover["valor"]
+                ruta["n_paradas"] = len(ruta["peds"])
+
+                # Agregar a la ruta destino
+                dest_ruta = rutas[dest_idx]
+                dest_ruta["peds"].append(ped_a_mover)
+                dest_ruta["kg_total"] += ped_a_mover["kilos"]
+                dest_ruta["val_total"] += ped_a_mover["valor"]
+                dest_ruta["n_paradas"] = len(dest_ruta["peds"])
+
+                # Recalcular impactos y porcentajes de carga
+                for r in [ruta, dest_ruta]:
+                    r["pct_carga"] = r["kg_total"] / r["cap_kg"] * 100 if r["cap_kg"] > 0 else 0
+                    r["impacto"] = r["flete"] / r["val_total"] * 100 if r["val_total"] > 0 else 0
+                    # Recalcular Part. x Peso de cada pedido
+                    for p in r["peds"]:
+                        if r["kg_total"] > 0 and p["valor"] > 0:
+                            p["flete_ped"] = r["flete"] * p["kilos"] / r["kg_total"]
+                            p["imp_ped"]   = p["flete_ped"] / p["valor"] * 100
+                break
+
+        # Quitar rutas que quedaron vacías (el pedido único fue movido)
+        rutas = [r for r in rutas if r["n_paradas"] > 0 or r.get("_keep_empty")]
 
     return rutas
 
@@ -1219,6 +1227,7 @@ def _render_widget_drag_and_drop(rutas):
             })
         rutas_js.append({
             "idx":        i,
+            "ruta_id":    str(r["id"]),   # ID único de la ruta (para asignación)
             "nombre":     f"R{i+1}",
             "transp":     str(r["transportista"]),
             "zona":       str(r["zona"]),
@@ -1292,24 +1301,25 @@ def _render_widget_drag_and_drop(rutas):
     border: 1px solid #e5e7eb;
     border-radius: 8px;
     overflow: hidden;
-    transition: box-shadow .15s;
+    transition: box-shadow .15s, opacity .15s;
+    cursor: grab;
   }
-  .ped:hover { box-shadow: 0 2px 6px rgba(0,0,0,.08); border-color: #9ca3af; }
-  .ped.dragging { opacity: 0.3; }
+  .ped:hover { box-shadow: 0 2px 8px rgba(0,0,0,.1); border-color: #9ca3af; }
+  .ped:active { cursor: grabbing; }
+  .ped.dragging { opacity: 0.25; box-shadow: none; }
   .ped-handle {
     flex-shrink: 0;
     padding: 10px 8px;
     background: #f3f4f6;
-    color: #6b7280;
-    cursor: grab;
+    color: #9ca3af;
     user-select: none;
     display: flex;
     align-items: center;
     font-size: 14px;
     border-right: 1px solid #e5e7eb;
+    letter-spacing: -1px;
   }
-  .ped-handle:active { cursor: grabbing; }
-  .ped-handle:hover { background: #e5e7eb; color: #111; }
+  .ped:hover .ped-handle { background: #e5e7eb; color: #374151; }
   .ped-body {
     flex: 1;
     padding: 10px 12px;
@@ -1500,63 +1510,72 @@ function render() {
             .trim();
         })(p.dir);
 
+        // La tarjeta COMPLETA es draggable (más confiable en iframe de Streamlit)
+        // El handle visual sirve como indicador pero el drag funciona desde cualquier parte
+        ped.draggable = true;
         ped.innerHTML = `
-          <div class="ped-handle" draggable="true" title="Arrastrar para mover">⋮⋮</div>
+          <div class="ped-handle" title="Arrastrá para mover a otra ruta">⋮⋮</div>
           <div class="ped-body">
             <div class="ped-top-row">
               <div class="ped-left">
                 <div class="ped-dir-row">
-                  <span class="ped-dir">${dirClean}</span>
-                  <span class="ped-kg-big">${p.kg.toFixed(0)} kg</span>
+                  <span class="ped-dir" ondragstart="event.stopPropagation()" style="pointer-events:none">${dirClean}</span>
+                  <span class="ped-kg-big" style="pointer-events:none">${p.kg.toFixed(0)} kg</span>
                 </div>
-                <div class="ped-loc">
+                <div class="ped-loc" style="pointer-events:none">
                   <span class="ped-zona-tag ${zonaCls}" style="margin-right:5px">${p.zona}</span>${p.loc || p.zona}
                 </div>
               </div>
-              <div class="ped-right-top">
+              <div class="ped-right-top" style="pointer-events:none">
                 <div class="ped-val">$${fmt(p.val)}</div>
                 <div class="ped-imp" style="color:${im.col};font-size:13px;font-weight:700">${p.imp.toFixed(2)}%</div>
               </div>
             </div>
-            <div class="ped-cli">${p.cli} · #${p.id} · CP ${p.cp} · ${p.btos} btos</div>
+            <div class="ped-cli" style="pointer-events:none">${p.cli} · #${p.id} · CP ${p.cp} · ${p.btos} btos</div>
           </div>
         `;
-        // Drag SOLO desde el handle
-        const handle = ped.querySelector(".ped-handle");
-        handle.addEventListener("dragstart", (e) => {
-          e.dataTransfer.setData("pid", p.id);
-          e.dataTransfer.setData("from", ri);
-          ped.classList.add("dragging");
-          // Hacer que el drag image sea la tarjeta completa
-          e.dataTransfer.setDragImage(ped, 20, 20);
+
+        ped.addEventListener("dragstart", (e) => {
+          e.dataTransfer.effectAllowed = "move";
+          // Mandamos: id_pedido|ruta_id_origen
+          e.dataTransfer.setData("text/plain", p.id + "|" + r.ruta_id);
+          setTimeout(() => ped.classList.add("dragging"), 0);
         });
-        handle.addEventListener("dragend", () => {
+        ped.addEventListener("dragend", () => {
           ped.classList.remove("dragging");
         });
         zone.appendChild(ped);
       });
     }
 
-    // Drop events en toda la ruta
+    // ── Drop zone ────────────────────────────────────────
     ruta.addEventListener("dragover", (e) => {
       e.preventDefault();
+      e.dataTransfer.dropEffect = "move";
       ruta.classList.add("drag-over");
     });
-    ruta.addEventListener("dragleave", () => {
-      ruta.classList.remove("drag-over");
+    ruta.addEventListener("dragleave", (e) => {
+      // Solo quitar el highlight si salimos de la ruta (no al pasar a un hijo)
+      if (!ruta.contains(e.relatedTarget)) {
+        ruta.classList.remove("drag-over");
+      }
     });
     ruta.addEventListener("drop", (e) => {
       e.preventDefault();
       ruta.classList.remove("drag-over");
-      const pid     = e.dataTransfer.getData("pid");
-      const fromIdx = parseInt(e.dataTransfer.getData("from"));
-      const toIdx   = ri;
-      if (fromIdx === toIdx) return;
-      // Enviar la asignación a Streamlit vía query param
+      // Leer datos del pedido arrastrado
+      const raw = e.dataTransfer.getData("text/plain");
+      if (!raw) return;
+      const parts      = raw.split("|");
+      const pid        = parts[0];
+      const fromRutaId = parts[1];
+      const toRutaId   = r.ruta_id;
+      if (fromRutaId === toRutaId || !pid) return;
+      // Comunicar el movimiento a Streamlit vía query params
       const url = new URL(window.parent.location.href);
-      url.searchParams.set("move_pid", pid);
-      url.searchParams.set("move_to", toIdx);
-      url.searchParams.set("_t", Date.now());
+      url.searchParams.set("move_pid",    pid);
+      url.searchParams.set("move_to_id",  toRutaId);
+      url.searchParams.set("_t",          String(Date.now()));
       window.parent.location.href = url.toString();
     });
 
@@ -1583,14 +1602,15 @@ def main():
 
     # Capturar query params del widget drag & drop
     qp = st.query_params
-    if "move_pid" in qp and "move_to" in qp:
+    if "move_pid" in qp and "move_to_id" in qp:
         try:
-            pid = str(qp["move_pid"])
-            to  = int(qp["move_to"])
-            st.session_state["asign_man"][pid] = to
+            pid      = str(qp["move_pid"])
+            ruta_id  = str(qp["move_to_id"])
+            # Guardar: pedido_id → ruta_id_destino (string)
+            # optimizar_rutas lo usará para asignar el pedido a esa ruta
+            st.session_state["asign_man"][pid] = ruta_id
         except Exception:
             pass
-        # Limpiar query params
         st.query_params.clear()
 
     pedidos_df, trans_df = sidebar_config()

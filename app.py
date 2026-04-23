@@ -1174,184 +1174,221 @@ def sidebar_config():
 # ══════════════════════════════════════════════════════════
 def _render_widget_drag_and_drop(rutas):
     """
-    Widget drag & drop usando declare_component para canal bidireccional real.
-    El componente devuelve {move_pid, move_to_id} cuando el usuario suelta un pedido.
+    Panel drag & drop usando components.html.
+    El drag es 100% visual dentro del iframe.
+    Al soltar, se usa un formulario HTML interno que hace una petición
+    fetch() a la URL del app (pasada desde Python) para actualizar query params.
+    Streamlit recarga y procesa el movimiento.
     """
     import streamlit.components.v1 as components
-    import os, pathlib
 
-    # ── Construir el HTML del componente ─────────────────────────────────
+    # Serializar rutas
     rutas_js = []
     for i, r in enumerate(rutas):
         peds_js = []
         for p in r["peds"]:
-            dir_str = str(p["direccion"])
             loc = str(p.get("localidad", "") or p.get("zona", ""))
-            corrs_p = corredores_de_localidad(loc)
-            corr_macro = min(corrs_p, key=lambda c: CORREDORES_SIZE.get(c, 999)) if corrs_p else ""
+            corrs = corredores_de_localidad(loc)
+            macro_raw = min(corrs, key=lambda c: CORREDORES_SIZE.get(c,999)) if corrs else ""
             MACRO = {"Norte 1":"Norte","Norte 2":"Norte","Noroeste 1":"Noroeste",
-                     "Noroeste 2":"Noroeste","Oeste":"Oeste","Norte-CABA-Sur":"CABA-Sur",
-                     "Sur 1":"Sur","CABA":"CABA"}
-            zona_label = MACRO.get(corr_macro, corr_macro)
+                     "Noroeste 2":"Noroeste","Oeste":"Oeste",
+                     "Norte-CABA-Sur":"CABA-Sur","Sur 1":"Sur","CABA":"CABA"}
+            zona_label = MACRO.get(macro_raw, macro_raw)
             peds_js.append({
-                "id":str(p["id"]), "dir":dir_str, "cli":str(p["cliente"]),
-                "zona":zona_label, "loc":loc,
-                "cp":int(p["cp"]), "kg":float(p["kilos"]),
-                "btos":int(p["bultos"]), "val":float(p["valor"]),
-                "imp":float(p["imp_ped"]),
+                "id":str(p["id"]),"dir":str(p["direccion"]),
+                "cli":str(p["cliente"]),"zona":zona_label,"loc":loc,
+                "cp":int(p["cp"]),"kg":float(p["kilos"]),
+                "btos":int(p["bultos"]),"val":float(p["valor"]),"imp":float(p["imp_ped"]),
             })
         rutas_js.append({
-            "idx":i, "ruta_id":str(r["id"]),
-            "nombre":f"R{i+1}", "transp":str(r["transportista"]),
-            "zona":str(r["zona"]),
-            "veh":str(r["vehiculo"]).replace("Greco - ",""),
-            "cap_kg":float(r["cap_kg"]), "kg_total":float(r["kg_total"]),
-            "val_total":float(r["val_total"]), "flete":float(r["flete"]),
-            "impacto":float(r["impacto"]), "pct_carga":float(r["pct_carga"]),
-            "n_paradas":int(r["n_paradas"]), "ayudante":bool(r["ayudante"]),
-            "peds":peds_js,
+            "idx":i,"ruta_id":str(r["id"]),
+            "nombre":f"R{i+1}","transp":str(r["transportista"]),
+            "zona":str(r["zona"]),"veh":str(r["vehiculo"]).replace("Greco - ",""),
+            "cap_kg":float(r["cap_kg"]),"kg_total":float(r["kg_total"]),
+            "val_total":float(r["val_total"]),"flete":float(r["flete"]),
+            "impacto":float(r["impacto"]),"pct_carga":float(r["pct_carga"]),
+            "n_paradas":int(r["n_paradas"]),"ayudante":bool(r["ayudante"]),"peds":peds_js,
         })
 
     rutas_json = json.dumps(rutas_js, ensure_ascii=False)
-    height = max(520, 260 + 95 * max(r["n_paradas"] for r in rutas))
+    height = max(540, 280 + 90 * max(r["n_paradas"] for r in rutas))
 
-    # ── Crear/actualizar el componente en /tmp ────────────────────────────
-    comp_dir = pathlib.Path("/tmp/smarket_dnd")
-    comp_dir.mkdir(exist_ok=True)
-    idx_html = comp_dir / "index.html"
+    html = """<!DOCTYPE html><html><head><meta charset="utf-8"><style>
+*{box-sizing:border-box;margin:0;padding:0;font-family:-apple-system,BlinkMacSystemFont,sans-serif}
+body{background:transparent;padding:4px 2px}
+.panel{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:10px}
+.ruta{border:1.5px solid #e5e7eb;border-radius:12px;background:#fff;display:flex;flex-direction:column;min-height:120px}
+.ruta.over{border-color:#2563eb;background:#eff6ff;box-shadow:0 0 0 2px #bfdbfe}
+.rh{padding:10px 12px;background:#f9fafb;border-bottom:1px solid #e5e7eb;border-radius:12px 12px 0 0}
+.rh-row{display:flex;justify-content:space-between;align-items:center;gap:4px;flex-wrap:wrap}
+.rh-name{font-size:13px;font-weight:700;color:#111}
+.bdg{display:inline-block;padding:2px 7px;border-radius:99px;font-size:10px;font-weight:600;margin-left:4px}
+.bg{background:#dcfce7;color:#166534}.by{background:#fef9c3;color:#854d0e}
+.br{background:#fee2e2;color:#991b1b}.bb{background:#dbeafe;color:#1e40af}.bk{background:#f3f4f6;color:#374151}
+.rh-stats{font-size:11px;color:#6b7280;margin-top:4px;display:flex;flex-wrap:wrap;gap:8px}
+.rh-stats b{color:#111}
+.bar{height:4px;background:#e5e7eb;border-radius:2px;margin-top:5px;overflow:hidden}
+.bf{height:100%;border-radius:2px}
+.pz{flex:1;padding:7px;display:flex;flex-direction:column;gap:5px;min-height:60px}
+.ped{display:flex;border:1px solid #e5e7eb;border-radius:8px;background:#fafafa;overflow:hidden;transition:opacity .15s,box-shadow .12s}
+.ped:hover{box-shadow:0 2px 8px rgba(0,0,0,.09);border-color:#9ca3af}
+.ped.ghost{opacity:.22}
+.ph{padding:8px 6px;background:#f3f4f6;color:#9ca3af;display:flex;align-items:center;font-size:13px;letter-spacing:-1px;cursor:grab;border-right:1px solid #e5e7eb;flex-shrink:0;user-select:none}
+.ped:hover .ph{background:#e5e7eb;color:#374151}
+.pb{flex:1;padding:7px 9px;min-width:0}
+.pt{display:flex;justify-content:space-between;align-items:flex-start;gap:6px}
+.pl{flex:1;min-width:0}
+.pdr{display:flex;align-items:baseline;gap:5px;flex-wrap:wrap}
+.dir{font-size:14px;font-weight:700;color:#111;line-height:1.3}
+.kg{font-size:13px;font-weight:700;color:#374151;white-space:nowrap}
+.pr{display:flex;flex-direction:column;align-items:flex-end;gap:1px;flex-shrink:0}
+.pval{font-size:11px;font-weight:600;color:#374151}
+.ploc{font-size:11px;font-weight:600;color:#374151;margin-top:2px}
+.pcli{font-size:10px;color:#9ca3af;margin-top:2px}
+.zt{display:inline-block;padding:1px 6px;border-radius:99px;font-size:9px;font-weight:700;text-transform:uppercase;margin-right:4px}
+.sur{background:#dcfce7;color:#166534}.norte{background:#fef9c3;color:#854d0e}
+.caba{background:#ede9fe;color:#5b21b6}.oeste{background:#ffedd5;color:#9a3412}
+.noroeste{background:#fce7f3;color:#9d174d}.cabasur{background:#e0f2fe;color:#0c4a6e}
+.empty{text-align:center;padding:16px;color:#9ca3af;font-size:11px;font-style:italic;border:2px dashed #e5e7eb;border-radius:7px;margin:4px}
+</style></head><body>
+<div class="panel" id="panel"></div>
+<script>
+const RUTAS=__RUTAS_JSON__;
+const APP_URL="__APP_URL__";
+let drag={pid:null,fromId:null};
 
-    html_content = (
-        "<!DOCTYPE html><html><head>"
-        "<script src=\"https://unpkg.com/streamlit-component-lib@2.0.0/dist/index.js\"></script>"
-        "<style>"
-        "*{box-sizing:border-box;margin:0;padding:0;font-family:-apple-system,sans-serif}"
-        "body{background:transparent;padding:4px}"
-        ".panel{display:grid;grid-template-columns:repeat(auto-fit,minmax(310px,1fr));gap:10px}"
-        ".ruta{border:1px solid #e5e7eb;border-radius:12px;background:#fff;overflow:hidden;display:flex;flex-direction:column;min-height:140px}"
-        ".ruta.drag-over{border:2px solid #2563eb;background:#eff6ff}"
-        ".ruta-head{padding:9px 12px;background:#f9fafb;border-bottom:1px solid #e5e7eb}"
-        ".badge{display:inline-block;padding:2px 7px;border-radius:99px;font-size:10px;font-weight:600;margin-left:3px}"
-        ".b-green{background:#dcfce7;color:#166534}.b-yellow{background:#fef9c3;color:#854d0e}"
-        ".b-red{background:#fee2e2;color:#991b1b}.b-blue{background:#dbeafe;color:#1e40af}.b-gray{background:#f3f4f6;color:#374151}"
-        ".stats{display:flex;flex-wrap:wrap;gap:8px;font-size:11px;color:#6b7280;margin-top:5px}"
-        ".stats b{color:#111}"
-        ".bar{height:4px;background:#e5e7eb;border-radius:2px;margin-top:5px;overflow:hidden}"
-        ".bar>div{height:100%;border-radius:2px}"
-        ".peds-zone{flex:1;padding:7px;min-height:70px;display:flex;flex-direction:column;gap:5px}"
-        ".ped{display:flex;background:#fafafa;border:1px solid #e5e7eb;border-radius:8px;overflow:hidden;cursor:grab;transition:box-shadow .12s,opacity .12s}"
-        ".ped:hover{box-shadow:0 2px 8px rgba(0,0,0,.1);border-color:#9ca3af}"
-        ".ped:active{cursor:grabbing}"
-        ".ped.dragging{opacity:.25}"
-        ".ped-handle{flex-shrink:0;padding:8px 7px;background:#f3f4f6;color:#9ca3af;display:flex;align-items:center;font-size:13px;border-right:1px solid #e5e7eb;letter-spacing:-1px}"
-        ".ped:hover .ped-handle{background:#e5e7eb;color:#374151}"
-        ".ped-body{flex:1;padding:7px 9px;min-width:0}"
-        ".ped-top{display:flex;justify-content:space-between;align-items:flex-start;gap:6px;margin-bottom:2px}"
-        ".ped-left{flex:1;min-width:0}"
-        ".ped-dir-row{display:flex;align-items:baseline;gap:5px;flex-wrap:wrap}"
-        ".ped-dir{font-size:14px;font-weight:700;color:#111;line-height:1.3}"
-        ".ped-kg{font-size:13px;font-weight:700;color:#374151;white-space:nowrap}"
-        ".ped-right{display:flex;flex-direction:column;align-items:flex-end;flex-shrink:0;gap:1px}"
-        ".ped-val{font-size:11px;font-weight:600;color:#374151}"
-        ".ped-loc{font-size:11px;font-weight:600;color:#374151;margin-top:2px}"
-        ".ped-cli{font-size:10px;color:#9ca3af;margin-top:2px}"
-        ".ztag{display:inline-block;padding:1px 6px;border-radius:99px;font-size:9px;font-weight:700;text-transform:uppercase;margin-right:4px}"
-        ".sur{background:#dcfce7;color:#166534}.norte{background:#fef9c3;color:#854d0e}"
-        ".caba{background:#ede9fe;color:#5b21b6}.oeste{background:#ffedd5;color:#9a3412}"
-        ".noroeste{background:#fce7f3;color:#9d174d}.cabasur{background:#e0f2fe;color:#0c4a6e}"
-        ".empty{text-align:center;padding:18px;color:#9ca3af;font-size:11px;font-style:italic;border:2px dashed #e5e7eb;border-radius:7px}"
-        "</style></head><body>"
-        "<div class='panel' id='panel'></div>"
-        "<script>"
-        "const {Streamlit}=window;"
-        "const RUTAS=" + rutas_json + ";"
-        "let lastVal=null;"
-        "function impC(v){return v<=3?{c:'b-green',k:'#16a34a'}:v<=5?{c:'b-yellow',k:'#d97706'}:{c:'b-red',k:'#dc2626'};}"
-        "function cc(p){return p>=75?'#16a34a':p>=45?'#d97706':'#dc2626';}"
-        "function fmt(n){return Math.round(n).toLocaleString('es-AR');}"
-        "function cleanDir(d){return d.replace(/, Ciudad Aut[oó]noma de Buenos Aires, Argentina/gi,'').replace(/, Buenos Aires, Argentina/gi,'').replace(/, Argentina/gi,'').replace(/(, *){2,}/g,', ').replace(/^[, ]+|[, ]+$/g,'').trim();}"
-        "function zcls(z){return({'Sur':'sur','Norte':'norte','CABA':'caba','Oeste':'oeste','Noroeste':'noroeste','CABA-Sur':'cabasur'})[z]||'';}"
-        "function render(){"
-        "  const panel=document.getElementById('panel');panel.innerHTML='';"
-        "  RUTAS.forEach((r,ri)=>{"
-        "    const im=impC(r.impacto),c=cc(r.pct_carga);"
-        "    const ruta=document.createElement('div');ruta.className='ruta';"
-        "    ruta.innerHTML="
-        "      '<div class=\"ruta-head\">'"
-        "      +'<div style=\"display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:3px\">'"
-        "      +'<div><span style=\"font-size:13px;font-weight:700\">'+(r.transp)+'</span>'"
-        "      +'<span class=\"badge b-blue\">'+(r.zona)+'</span>'"
-        "      +'<span class=\"badge b-gray\">'+(r.veh)+'</span></div>'"
-        "      +'<span class=\"badge '+(im.c)+'\" style=\"font-size:12px\">'+(r.impacto.toFixed(2))+'%</span></div>'"
-        "      +'<div class=\"stats\"><span>'+(r.n_paradas)+' par.</span>'"
-        "      +'<span><b>'+(fmt(r.kg_total))+' kg</b> / '+(fmt(r.cap_kg))+' kg</span>'"
-        "      +'<span style=\"color:'+(c)+';font-weight:600\">'+(r.pct_carga.toFixed(0))+'% carga</span>'"
-        "      +'<span>Flete <b>$'+(fmt(r.flete))+'</b></span></div>'"
-        "      +'<div class=\"bar\"><div style=\"width:'+Math.min(r.pct_carga,100)+'%;background:'+(c)+'\"></div></div>'"
-        "      +'<div class=\"bar\" style=\"margin-top:2px\"><div style=\"width:'+Math.min(r.impacto/8*100,100)+'%;background:'+(im.k)+'\"></div></div>'"
-        "      +'</div>'"
-        "      +'<div class=\"peds-zone\" id=\"z'+ri+'\"></div>';"
-        "    const zone=ruta.querySelector('.peds-zone');"
-        "    if(!r.peds.length){zone.innerHTML='<div class=\"empty\">Soltá pedidos acá</div>';}"
-        "    else{r.peds.forEach(p=>{"
-        "      const imp=impC(p.imp),zc=zcls(p.zona),dc=cleanDir(p.dir);"
-        "      const ped=document.createElement('div');ped.className='ped';ped.draggable=true;"
-        "      ped.innerHTML="
-        "        '<div class=\"ped-handle\">⋮⋮</div>'"
-        "        +'<div class=\"ped-body\">'"
-        "        +'<div class=\"ped-top\">'"
-        "        +'<div class=\"ped-left\">'"
-        "        +'<div class=\"ped-dir-row\"><span class=\"ped-dir\">'+(dc)+'</span><span class=\"ped-kg\">'+(p.kg.toFixed(0))+' kg</span></div>'"
-        "        +'<div class=\"ped-loc\"><span class=\"ztag '+(zc)+'\">'+(p.zona)+'</span>'+(p.loc||p.zona)+'</div>'"
-        "        +'</div>'"
-        "        +'<div class=\"ped-right\"><div class=\"ped-val\">$'+(fmt(p.val))+'</div>'"
-        "        +'<div style=\"font-size:12px;font-weight:700;color:'+(imp.k)+'\">'+(p.imp.toFixed(2))+'%</div></div>'"
-        "        +'</div>'"
-        "        +'<div class=\"ped-cli\">'+(p.cli)+' · #'+(p.id)+' · CP '+(p.cp)+' · '+(p.btos)+' btos</div>'"
-        "        +'</div>';"
-        "      ped.addEventListener('dragstart',(e)=>{"
-        "        e.dataTransfer.effectAllowed='move';"
-        "        e.dataTransfer.setData('pid',p.id);"
-        "        e.dataTransfer.setData('from',String(ri));"
-        "        setTimeout(()=>ped.classList.add('dragging'),0);"
-        "      });"
-        "      ped.addEventListener('dragend',()=>ped.classList.remove('dragging'));"
-        "      zone.appendChild(ped);"
-        "    });}"
-        "    ruta.addEventListener('dragover',(e)=>{e.preventDefault();ruta.classList.add('drag-over');});"
-        "    ruta.addEventListener('dragleave',(e)=>{"
-        "      if(!ruta.contains(e.relatedTarget))ruta.classList.remove('drag-over');"
-        "    });"
-        "    ruta.addEventListener('drop',(e)=>{"
-        "      e.preventDefault();ruta.classList.remove('drag-over');"
-        "      const pid=e.dataTransfer.getData('pid'),fi=parseInt(e.dataTransfer.getData('from'));"
-        "      if(fi===ri||!pid)return;"
-        "      const val={move_pid:pid,move_to_id:r.ruta_id};"
-        "      if(JSON.stringify(val)===JSON.stringify(lastVal))return;"
-        "      lastVal=val;"
-        "      Streamlit.setComponentValue(val);"
-        "    });"
-        "    panel.appendChild(ruta);"
-        "  });"
-        "  Streamlit.setFrameHeight(document.body.scrollHeight+10);"
-        "}"
-        "Streamlit.events.addEventListener(Streamlit.RENDER_EVENT,()=>render());"
-        "Streamlit.setComponentReady();"
-        "</script></body></html>"
-    )
+function ic(v){return v<=3?"bg":v<=5?"by":"br";}
+function ik(v){return v<=3?"#16a34a":v<=5?"#d97706":"#dc2626";}
+function cc(p){return p>=75?"#16a34a":p>=45?"#d97706":"#dc2626";}
+function fmt(n){return Math.round(n).toLocaleString("es-AR");}
+function cd(d){
+  return d.replace(/, Ciudad Aut[oó]noma de Buenos Aires, Argentina/gi,"")
+          .replace(/, Buenos Aires, Argentina/gi,"")
+          .replace(/, Argentina/gi,"")
+          .replace(/(, *){2,}/g,", ")
+          .replace(/^[, ]+|[, ]+$/g,"").trim();
+}
+function zc(z){return({"Sur":"sur","Norte":"norte","CABA":"caba","Oeste":"oeste","Noroeste":"noroeste","CABA-Sur":"cabasur"})[z]||"";}
 
-    idx_html.write_text(html_content, encoding="utf-8")
+// Form oculto para enviar el movimiento al top-level window
+// target="_top" funciona incluso dentro del sandbox de Streamlit
+const _form = document.createElement("form");
+_form.method = "GET";
+_form.target = "_top";
+_form.style.display = "none";
+["move_pid","move_to_id","_t"].forEach(n=>{
+  const i=document.createElement("input");i.type="hidden";i.name=n;_form.appendChild(i);
+});
+document.body.appendChild(_form);
 
-    # ── Registrar y llamar el componente ─────────────────────────────────
-    _widget = components.declare_component("smarket_dnd", path=str(comp_dir))
-    result = _widget(key=f"dnd_{'_'.join(r['id'] for r in rutas[:2])}", default=None)
+function sendMove(pid, toRutaId){
+  const base = (APP_URL && APP_URL !== "__APP_URL__") ? APP_URL : "";
+  if(!base){ console.warn("APP_URL no disponible"); return; }
+  _form.action = base;
+  _form.elements["move_pid"].value = pid;
+  _form.elements["move_to_id"].value = toRutaId;
+  _form.elements["_t"].value = String(Date.now());
+  _form.submit();
+}
 
-    # ── Procesar resultado del drop ───────────────────────────────────────
-    if result and isinstance(result, dict) and "move_pid" in result:
-        pid     = str(result["move_pid"])
-        ruta_id = str(result["move_to_id"])
-        if st.session_state.get("asign_man", {}).get(pid) != ruta_id:
-            st.session_state.setdefault("asign_man", {})[pid] = ruta_id
-            st.rerun()
+function render(){
+  const p=document.getElementById("panel");p.innerHTML="";
+  RUTAS.forEach((r,ri)=>{
+    const imp=ic(r.impacto),c=cc(r.pct_carga);
+    const el=document.createElement("div");el.className="ruta";
+    el.innerHTML=
+      '<div class="rh">'
+      +'<div class="rh-row"><div><span class="rh-name">'+r.transp+'</span>'
+      +'<span class="bdg bb">'+r.zona+'</span><span class="bdg bk">'+r.veh+'</span>'
+      +(r.ayudante?'<span class="bdg by">+Ay.</span>':'')+'</div>'
+      +'<span class="bdg '+imp+'" style="font-size:12px">'+r.impacto.toFixed(2)+'%</span></div>'
+      +'<div class="rh-stats"><span>'+r.n_paradas+' par.</span>'
+      +'<span><b>'+fmt(r.kg_total)+' kg</b> / '+fmt(r.cap_kg)+' kg</span>'
+      +'<span style="color:'+c+';font-weight:600">'+r.pct_carga.toFixed(0)+'% carga</span>'
+      +'<span>Flete <b>$'+fmt(r.flete)+'</b></span></div>'
+      +'<div class="bar"><div class="bf" style="width:'+Math.min(r.pct_carga,100)+'%;background:'+c+'"></div></div>'
+      +'<div class="bar" style="margin-top:2px"><div class="bf" style="width:'+Math.min(r.impacto/8*100,100)+'%;background:'+ik(r.impacto)+'"></div></div>'
+      +'</div>'
+      +'<div class="pz" id="pz'+ri+'"></div>';
+
+    const zone=el.querySelector(".pz");
+    if(!r.peds.length){zone.innerHTML='<div class="empty">Soltá pedidos acá</div>';}
+    else r.peds.forEach(p=>{
+      const im=ik(p.imp),z=zc(p.zona),dc=cd(p.dir);
+      const ped=document.createElement("div");ped.className="ped";
+      ped.innerHTML=
+        '<div class="ph" draggable="true">⋮⋮</div>'
+        +'<div class="pb">'
+        +'<div class="pt"><div class="pl">'
+        +'<div class="pdr"><span class="dir">'+dc+'</span><span class="kg">'+p.kg.toFixed(0)+' kg</span></div>'
+        +'<div class="ploc"><span class="zt '+z+'">'+p.zona+'</span>'+(p.loc||p.zona)+'</div>'
+        +'</div>'
+        +'<div class="pr"><div class="pval">$'+fmt(p.val)+'</div>'
+        +'<div style="font-size:12px;font-weight:700;color:'+im+'">'+p.imp.toFixed(2)+'%</div></div>'
+        +'</div>'
+        +'<div class="pcli">'+p.cli+' · #'+p.id+' · CP '+p.cp+' · '+p.btos+' btos</div>'
+        +'</div>';
+
+      const handle=ped.querySelector(".ph");
+      handle.addEventListener("dragstart",(e)=>{
+        drag={pid:p.id,fromId:r.ruta_id};
+        e.dataTransfer.effectAllowed="move";
+        e.dataTransfer.setData("text/plain",p.id+"|"+r.ruta_id);
+        setTimeout(()=>ped.classList.add("ghost"),0);
+      });
+      handle.addEventListener("dragend",()=>ped.classList.remove("ghost"));
+      zone.appendChild(ped);
+    });
+
+    // Drop handlers en la columna
+    el.addEventListener("dragover",(e)=>{e.preventDefault();el.classList.add("over");});
+    el.addEventListener("dragleave",(e)=>{if(!el.contains(e.relatedTarget))el.classList.remove("over");});
+    el.addEventListener("drop",(e)=>{
+      e.preventDefault();el.classList.remove("over");
+      const raw=e.dataTransfer.getData("text/plain");
+      if(!raw)return;
+      const [pid,fromId]=raw.split("|");
+      if(!pid||fromId===r.ruta_id)return;
+      sendMove(pid,r.ruta_id);
+    });
+    document.getElementById("panel").appendChild(el);
+  });
+}
+render();
+</script></body></html>"""
+
+    # APP_URL: obtener la URL base de la app para que el form sepa donde navegar
+    app_url = ""
+    try:
+        # Streamlit ≥ 1.37 expone st.context con los headers del request
+        ctx = st.context
+        if hasattr(ctx, "headers"):
+            hdrs = ctx.headers
+            ref = hdrs.get("Referer") or hdrs.get("Origin") or ""
+            if ref:
+                from urllib.parse import urlparse
+                p = urlparse(ref)
+                app_url = f"{p.scheme}://{p.netloc}{p.path}"
+    except Exception:
+        pass
+    if not app_url:
+        try:
+            # Leer de runtime context interno de Streamlit (todas las versiones)
+            from streamlit.runtime.scriptrunner import get_script_run_ctx
+            ctx2 = get_script_run_ctx()
+            if ctx2 and hasattr(ctx2, "request") and ctx2.request:
+                req = ctx2.request
+                host = getattr(req, "host", "") or ""
+                if host:
+                    app_url = f"https://{host}/"
+        except Exception:
+            pass
+
+    html = html.replace("__RUTAS_JSON__", rutas_json)
+    html = html.replace("__APP_URL__", app_url)
+    components.html(html, height=height, scrolling=True)
+
+    # La captura de query params se hace al inicio del main()
 
 
 def main():
@@ -1361,8 +1398,18 @@ def main():
     if "asign_man"    not in st.session_state: st.session_state["asign_man"]    = {}
     if "rutas_extra"  not in st.session_state: st.session_state["rutas_extra"]  = []
 
-    # Los movimientos se procesan directamente en _render_widget_drag_and_drop
-    # via declare_component (canal bidireccional real, sin query params)
+    # Capturar query params del drag & drop
+    try:
+        qp = st.query_params
+        if "move_pid" in qp and "move_to_id" in qp:
+            pid     = str(qp["move_pid"])
+            ruta_id = str(qp["move_to_id"])
+            if st.session_state.get("asign_man", {}).get(pid) != ruta_id:
+                st.session_state.setdefault("asign_man", {})[pid] = ruta_id
+                st.query_params.clear()
+                st.rerun()
+    except Exception:
+        pass
 
     pedidos_df, trans_df = sidebar_config()
 

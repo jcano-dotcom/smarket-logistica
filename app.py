@@ -1270,25 +1270,44 @@ function cd(d){
 }
 function zc(z){return({"Sur":"sur","Norte":"norte","CABA":"caba","Oeste":"oeste","Noroeste":"noroeste","CABA-Sur":"cabasur"})[z]||"";}
 
-// Form oculto para enviar el movimiento al top-level window
-// target="_top" funciona incluso dentro del sandbox de Streamlit
-const _form = document.createElement("form");
-_form.method = "GET";
-_form.target = "_top";
-_form.style.display = "none";
-["move_pid","move_to_id","_t"].forEach(n=>{
-  const i=document.createElement("input");i.type="hidden";i.name=n;_form.appendChild(i);
-});
-document.body.appendChild(_form);
-
+// Form para enviar movimiento — estrategia robusta sin depender de APP_URL
+// Intenta 3 métodos en cascada:
+//  1) postMessage al parent (Streamlit lo captura si escucha)
+//  2) window.top.location.href con la URL del referrer
+//  3) form submit con target="_top" (navega el documento raíz)
 function sendMove(pid, toRutaId){
-  const base = (APP_URL && APP_URL !== "__APP_URL__") ? APP_URL : "";
-  if(!base){ console.warn("APP_URL no disponible"); return; }
-  _form.action = base;
-  _form.elements["move_pid"].value = pid;
-  _form.elements["move_to_id"].value = toRutaId;
-  _form.elements["_t"].value = String(Date.now());
-  _form.submit();
+  console.log("sendMove:", pid, "→", toRutaId);
+  // Construir query string
+  const qs = "?move_pid=" + encodeURIComponent(pid)
+          + "&move_to_id=" + encodeURIComponent(toRutaId)
+          + "&_t=" + Date.now();
+
+  // Construir URL absoluta para el top-level Streamlit window
+  // Streamlit habilita allow-top-navigation-by-user-activation,
+  // entonces una acción iniciada por usuario (drop) PUEDE navegar el top window.
+
+  // Preferir APP_URL si está disponible
+  let base = (APP_URL && APP_URL !== "__APP_URL__") ? APP_URL : "";
+
+  // Si no hay APP_URL, intentar leer del parent (algunas versiones permiten leer)
+  if (!base) {
+    try {
+      base = window.parent.location.href.split("?")[0].split("#")[0];
+    } catch(e) {
+      // Sandbox bloquea lectura. Usar URL relativa.
+    }
+  }
+
+  // Usar anchor con target="_top" (el método más confiable en iframe)
+  const a = document.createElement("a");
+  a.href = (base || "") + qs;
+  a.target = "_top";
+  a.rel = "noopener";
+  a.style.display = "none";
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  console.log("anchor click →", a.href);
 }
 
 function render(){
@@ -1357,30 +1376,45 @@ function render(){
 render();
 </script></body></html>"""
 
-    # APP_URL: obtener la URL base de la app para que el form sepa donde navegar
+    # APP_URL: obtener la URL base de la app
+    # Se usa para que el drag & drop pueda navegar al top-window con query params
     app_url = ""
+
+    # Método 1: st.context (Streamlit ≥ 1.37)
     try:
-        # Streamlit ≥ 1.37 expone st.context con los headers del request
         ctx = st.context
         if hasattr(ctx, "headers"):
             hdrs = ctx.headers
-            ref = hdrs.get("Referer") or hdrs.get("Origin") or ""
+            # "Host" es el dominio del servidor Streamlit
+            host = hdrs.get("Host") or hdrs.get("host") or ""
+            # "Referer" tiene la URL completa de donde viene la request
+            ref  = hdrs.get("Referer") or hdrs.get("referer") or ""
             if ref:
                 from urllib.parse import urlparse
                 p = urlparse(ref)
-                app_url = f"{p.scheme}://{p.netloc}{p.path}"
+                if p.scheme and p.netloc:
+                    app_url = f"{p.scheme}://{p.netloc}{p.path or '/'}"
+            elif host:
+                # Sin referer, construir HTTPS con el host
+                app_url = f"https://{host}/"
     except Exception:
         pass
+
+    # Método 2: Runtime context interno (fallback)
     if not app_url:
         try:
-            # Leer de runtime context interno de Streamlit (todas las versiones)
             from streamlit.runtime.scriptrunner import get_script_run_ctx
+            from streamlit.web.server.server import Server
             ctx2 = get_script_run_ctx()
-            if ctx2 and hasattr(ctx2, "request") and ctx2.request:
-                req = ctx2.request
-                host = getattr(req, "host", "") or ""
-                if host:
-                    app_url = f"https://{host}/"
+            if ctx2:
+                # Intentar obtener la request del session info
+                for attr in ("request", "_client", "session_info"):
+                    req = getattr(ctx2, attr, None)
+                    if req and hasattr(req, "host"):
+                        host = req.host
+                        if host:
+                            app_url = f"https://{host}/"
+                            break
         except Exception:
             pass
 
@@ -1404,12 +1438,20 @@ def main():
         if "move_pid" in qp and "move_to_id" in qp:
             pid     = str(qp["move_pid"])
             ruta_id = str(qp["move_to_id"])
-            if st.session_state.get("asign_man", {}).get(pid) != ruta_id:
-                st.session_state.setdefault("asign_man", {})[pid] = ruta_id
-                st.query_params.clear()
-                st.rerun()
-    except Exception:
+            # Guardar asignación manual
+            st.session_state.setdefault("asign_man", {})[pid] = ruta_id
+            # Flash message para confirmación visual
+            st.session_state["_last_move"] = (pid, ruta_id)
+            # Limpiar URL y recargar
+            st.query_params.clear()
+            st.rerun()
+    except Exception as e:
         pass
+
+    # Mostrar confirmación del último movimiento
+    if "_last_move" in st.session_state:
+        pid_m, rid_m = st.session_state.pop("_last_move")
+        st.toast(f"✅ Pedido #{pid_m} movido a {rid_m}", icon="🚚")
 
     pedidos_df, trans_df = sidebar_config()
 

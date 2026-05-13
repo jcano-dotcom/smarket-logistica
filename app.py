@@ -1174,11 +1174,9 @@ def sidebar_config():
 # ══════════════════════════════════════════════════════════
 def _render_widget_drag_and_drop(rutas):
     """
-    Panel drag & drop usando components.html.
-    El drag es 100% visual dentro del iframe.
-    Al soltar, se usa un formulario HTML interno que hace una petición
-    fetch() a la URL del app (pasada desde Python) para actualizar query params.
-    Streamlit recarga y procesa el movimiento.
+    Panel drag & drop — comunicación via st.query_params usando
+    un <a target="_top"> que navega el top-level window.
+    Compatible con el sandbox de Streamlit Cloud.
     """
     import streamlit.components.v1 as components
 
@@ -1213,12 +1211,30 @@ def _render_widget_drag_and_drop(rutas):
     rutas_json = json.dumps(rutas_js, ensure_ascii=False)
     height = max(540, 280 + 90 * max(r["n_paradas"] for r in rutas))
 
+    # Obtener URL base del app (para el anchor target=_top)
+    app_url = ""
+    try:
+        ctx = st.context
+        if hasattr(ctx, "headers"):
+            h = ctx.headers
+            ref = h.get("Referer") or h.get("referer") or ""
+            host = h.get("Host") or h.get("host") or ""
+            if ref:
+                from urllib.parse import urlparse
+                p2 = urlparse(ref)
+                if p2.scheme and p2.netloc:
+                    app_url = f"{p2.scheme}://{p2.netloc}/"
+            elif host and not host.startswith("localhost"):
+                app_url = f"https://{host}/"
+    except Exception:
+        pass
+
     html = """<!DOCTYPE html><html><head><meta charset="utf-8"><style>
 *{box-sizing:border-box;margin:0;padding:0;font-family:-apple-system,BlinkMacSystemFont,sans-serif}
 body{background:transparent;padding:4px 2px}
 .panel{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:10px}
-.ruta{border:1.5px solid #e5e7eb;border-radius:12px;background:#fff;display:flex;flex-direction:column;min-height:120px}
-.ruta.over{border-color:#2563eb;background:#eff6ff;box-shadow:0 0 0 2px #bfdbfe}
+.ruta{border:1.5px solid #e5e7eb;border-radius:12px;background:#fff;display:flex;flex-direction:column;min-height:120px;transition:border-color .15s,background .15s}
+.ruta.over{border-color:#2563eb !important;background:#eff6ff !important;box-shadow:0 0 0 3px #bfdbfe}
 .rh{padding:10px 12px;background:#f9fafb;border-bottom:1px solid #e5e7eb;border-radius:12px 12px 0 0}
 .rh-row{display:flex;justify-content:space-between;align-items:center;gap:4px;flex-wrap:wrap}
 .rh-name{font-size:13px;font-weight:700;color:#111}
@@ -1230,10 +1246,11 @@ body{background:transparent;padding:4px 2px}
 .bar{height:4px;background:#e5e7eb;border-radius:2px;margin-top:5px;overflow:hidden}
 .bf{height:100%;border-radius:2px}
 .pz{flex:1;padding:7px;display:flex;flex-direction:column;gap:5px;min-height:60px}
-.ped{display:flex;border:1px solid #e5e7eb;border-radius:8px;background:#fafafa;overflow:hidden;transition:opacity .15s,box-shadow .12s}
+.ped{display:flex;border:1px solid #e5e7eb;border-radius:8px;background:#fafafa;overflow:hidden;transition:opacity .15s,box-shadow .12s;cursor:grab;user-select:none}
 .ped:hover{box-shadow:0 2px 8px rgba(0,0,0,.09);border-color:#9ca3af}
-.ped.ghost{opacity:.22}
-.ph{padding:8px 6px;background:#f3f4f6;color:#9ca3af;display:flex;align-items:center;font-size:13px;letter-spacing:-1px;cursor:grab;border-right:1px solid #e5e7eb;flex-shrink:0;user-select:none}
+.ped:active{cursor:grabbing}
+.ped.ghost{opacity:.22;cursor:grabbing}
+.ph{padding:8px 6px;background:#f3f4f6;color:#9ca3af;display:flex;align-items:center;font-size:13px;letter-spacing:-1px;border-right:1px solid #e5e7eb;flex-shrink:0}
 .ped:hover .ph{background:#e5e7eb;color:#374151}
 .pb{flex:1;padding:7px 9px;min-width:0}
 .pt{display:flex;justify-content:space-between;align-items:flex-start;gap:6px}
@@ -1250,179 +1267,136 @@ body{background:transparent;padding:4px 2px}
 .caba{background:#ede9fe;color:#5b21b6}.oeste{background:#ffedd5;color:#9a3412}
 .noroeste{background:#fce7f3;color:#9d174d}.cabasur{background:#e0f2fe;color:#0c4a6e}
 .empty{text-align:center;padding:16px;color:#9ca3af;font-size:11px;font-style:italic;border:2px dashed #e5e7eb;border-radius:7px;margin:4px}
+.toast{position:fixed;bottom:16px;right:16px;background:#111;color:#fff;padding:10px 16px;border-radius:8px;font-size:12px;font-weight:600;opacity:0;transition:opacity .3s;z-index:999;pointer-events:none}
+.toast.show{opacity:1}
 </style></head><body>
 <div class="panel" id="panel"></div>
+<div class="toast" id="toast"></div>
 <script>
 const RUTAS=__RUTAS_JSON__;
 const APP_URL="__APP_URL__";
-let drag={pid:null,fromId:null};
+let dragging={pid:null,fromId:null,el:null};
 
 function ic(v){return v<=3?"bg":v<=5?"by":"br";}
 function ik(v){return v<=3?"#16a34a":v<=5?"#d97706":"#dc2626";}
 function cc(p){return p>=75?"#16a34a":p>=45?"#d97706":"#dc2626";}
 function fmt(n){return Math.round(n).toLocaleString("es-AR");}
-function cd(d){
-  return d.replace(/, Ciudad Aut[oó]noma de Buenos Aires, Argentina/gi,"")
-          .replace(/, Buenos Aires, Argentina/gi,"")
-          .replace(/, Argentina/gi,"")
-          .replace(/(, *){2,}/g,", ")
-          .replace(/^[, ]+|[, ]+$/g,"").trim();
-}
+function cd(d){return d.replace(/, Ciudad Aut[oó]noma de Buenos Aires, Argentina/gi,"").replace(/, Buenos Aires, Argentina/gi,"").replace(/, Argentina/gi,"").replace(/(, *){2,}/g,", ").replace(/^[, ]+|[, ]+$/g,"").trim();}
 function zc(z){return({"Sur":"sur","Norte":"norte","CABA":"caba","Oeste":"oeste","Noroeste":"noroeste","CABA-Sur":"cabasur"})[z]||"";}
 
-// Form para enviar movimiento — estrategia robusta sin depender de APP_URL
-// Intenta 3 métodos en cascada:
-//  1) postMessage al parent (Streamlit lo captura si escucha)
-//  2) window.top.location.href con la URL del referrer
-//  3) form submit con target="_top" (navega el documento raíz)
-function sendMove(pid, toRutaId){
-  console.log("sendMove:", pid, "→", toRutaId);
-  // Construir query string
-  const qs = "?move_pid=" + encodeURIComponent(pid)
-          + "&move_to_id=" + encodeURIComponent(toRutaId)
-          + "&_t=" + Date.now();
+function showToast(msg){
+  const t=document.getElementById("toast");
+  t.textContent=msg;t.classList.add("show");
+  setTimeout(()=>t.classList.remove("show"),2500);
+}
 
-  // Construir URL absoluta para el top-level Streamlit window
-  // Streamlit habilita allow-top-navigation-by-user-activation,
-  // entonces una acción iniciada por usuario (drop) PUEDE navegar el top window.
-
-  // Preferir APP_URL si está disponible
-  let base = (APP_URL && APP_URL !== "__APP_URL__") ? APP_URL : "";
-
-  // Si no hay APP_URL, intentar leer del parent (algunas versiones permiten leer)
-  if (!base) {
-    try {
-      base = window.parent.location.href.split("?")[0].split("#")[0];
-    } catch(e) {
-      // Sandbox bloquea lectura. Usar URL relativa.
-    }
+function doMove(pid, toRutaId){
+  showToast("Moviendo pedido #"+pid+"...");
+  const qs="?move_pid="+encodeURIComponent(pid)+"&move_to_id="+encodeURIComponent(toRutaId)+"&_t="+Date.now();
+  
+  // Construir URL completa
+  let url = "";
+  if(APP_URL && APP_URL !== "__APP_URL__"){
+    url = APP_URL.replace(/\\/+$/, "") + "/" + qs;
+  } else {
+    url = qs; // URL relativa — el anchor target=_top la resuelve contra el top window
   }
-
-  // Usar anchor con target="_top" (el método más confiable en iframe)
+  
+  // Crear anchor invisible y hacer click — target=_top navega el top-level window
   const a = document.createElement("a");
-  a.href = (base || "") + qs;
+  a.href = url;
   a.target = "_top";
-  a.rel = "noopener";
-  a.style.display = "none";
+  a.style.cssText = "position:fixed;opacity:0;pointer-events:none";
   document.body.appendChild(a);
   a.click();
-  document.body.removeChild(a);
-  console.log("anchor click →", a.href);
+  setTimeout(()=>document.body.removeChild(a), 1000);
 }
 
 function render(){
-  const p=document.getElementById("panel");p.innerHTML="";
+  const panel=document.getElementById("panel");panel.innerHTML="";
   RUTAS.forEach((r,ri)=>{
     const imp=ic(r.impacto),c=cc(r.pct_carga);
     const el=document.createElement("div");el.className="ruta";
+
     el.innerHTML=
-      '<div class="rh">'
-      +'<div class="rh-row"><div><span class="rh-name">'+r.transp+'</span>'
-      +'<span class="bdg bb">'+r.zona+'</span><span class="bdg bk">'+r.veh+'</span>'
-      +(r.ayudante?'<span class="bdg by">+Ay.</span>':'')+'</div>'
-      +'<span class="bdg '+imp+'" style="font-size:12px">'+r.impacto.toFixed(2)+'%</span></div>'
-      +'<div class="rh-stats"><span>'+r.n_paradas+' par.</span>'
-      +'<span><b>'+fmt(r.kg_total)+' kg</b> / '+fmt(r.cap_kg)+' kg</span>'
-      +'<span style="color:'+c+';font-weight:600">'+r.pct_carga.toFixed(0)+'% carga</span>'
-      +'<span>Flete <b>$'+fmt(r.flete)+'</b></span></div>'
-      +'<div class="bar"><div class="bf" style="width:'+Math.min(r.pct_carga,100)+'%;background:'+c+'"></div></div>'
-      +'<div class="bar" style="margin-top:2px"><div class="bf" style="width:'+Math.min(r.impacto/8*100,100)+'%;background:'+ik(r.impacto)+'"></div></div>'
-      +'</div>'
-      +'<div class="pz" id="pz'+ri+'"></div>';
+      "<div class='rh'>"
+      +"<div class='rh-row'><div><span class='rh-name'>"+r.transp+"</span>"
+      +"<span class='bdg bb'>"+r.zona+"</span><span class='bdg bk'>"+r.veh+"</span>"
+      +(r.ayudante?"<span class='bdg by'>+Ay.</span>":"")+"</div>"
+      +"<span class='bdg "+imp+"' style='font-size:12px'>"+r.impacto.toFixed(2)+"%</span></div>"
+      +"<div class='rh-stats'><span>"+r.n_paradas+" par.</span>"
+      +"<span><b>"+fmt(r.kg_total)+" kg</b> / "+fmt(r.cap_kg)+" kg</span>"
+      +"<span style='color:"+c+";font-weight:600'>"+r.pct_carga.toFixed(0)+"% carga</span>"
+      +"<span>Flete <b>$"+fmt(r.flete)+"</b></span></div>"
+      +"<div class='bar'><div class='bf' style='width:"+Math.min(r.pct_carga,100)+"%;background:"+c+"'></div></div>"
+      +"<div class='bar' style='margin-top:2px'><div class='bf' style='width:"+Math.min(r.impacto/8*100,100)+"%;background:"+ik(r.impacto)+"'></div></div>"
+      +"</div>"
+      +"<div class='pz' id='pz"+ri+"'></div>";
 
     const zone=el.querySelector(".pz");
-    if(!r.peds.length){zone.innerHTML='<div class="empty">Soltá pedidos acá</div>';}
+    if(!r.peds.length){zone.innerHTML="<div class='empty'>Soltá pedidos acá</div>";}
     else r.peds.forEach(p=>{
       const im=ik(p.imp),z=zc(p.zona),dc=cd(p.dir);
       const ped=document.createElement("div");ped.className="ped";
       ped.innerHTML=
-        '<div class="ph" draggable="true">⋮⋮</div>'
-        +'<div class="pb">'
-        +'<div class="pt"><div class="pl">'
-        +'<div class="pdr"><span class="dir">'+dc+'</span><span class="kg">'+p.kg.toFixed(0)+' kg</span></div>'
-        +'<div class="ploc"><span class="zt '+z+'">'+p.zona+'</span>'+(p.loc||p.zona)+'</div>'
-        +'</div>'
-        +'<div class="pr"><div class="pval">$'+fmt(p.val)+'</div>'
-        +'<div style="font-size:12px;font-weight:700;color:'+im+'">'+p.imp.toFixed(2)+'%</div></div>'
-        +'</div>'
-        +'<div class="pcli">'+p.cli+' · #'+p.id+' · CP '+p.cp+' · '+p.btos+' btos</div>'
-        +'</div>';
+        "<div class='ph'>⋮⋮</div>"
+        +"<div class='pb'>"
+        +"<div class='pt'><div class='pl'>"
+        +"<div class='pdr'><span class='dir'>"+dc+"</span><span class='kg'>"+p.kg.toFixed(0)+" kg</span></div>"
+        +"<div class='ploc'><span class='zt "+z+"'>"+p.zona+"</span>"+( p.loc||p.zona)+"</div>"
+        +"</div>"
+        +"<div class='pr'><div class='pval'>$"+fmt(p.val)+"</div>"
+        +"<div style='font-size:12px;font-weight:700;color:"+im+"'>"+p.imp.toFixed(2)+"%</div></div>"
+        +"</div>"
+        +"<div class='pcli'>"+p.cli+" · #"+p.id+" · CP "+p.cp+" · "+p.btos+" btos</div>"
+        +"</div>";
 
-      const handle=ped.querySelector(".ph");
-      handle.addEventListener("dragstart",(e)=>{
-        drag={pid:p.id,fromId:r.ruta_id};
+      // DRAG EVENTS
+      ped.addEventListener("mousedown", ()=>{
+        dragging={pid:p.id, fromId:r.ruta_id, el:ped};
+      });
+      ped.addEventListener("dragstart",(e)=>{
+        dragging={pid:p.id, fromId:r.ruta_id, el:ped};
         e.dataTransfer.effectAllowed="move";
-        e.dataTransfer.setData("text/plain",p.id+"|"+r.ruta_id);
+        e.dataTransfer.setData("text/plain", p.id+"|"+r.ruta_id);
         setTimeout(()=>ped.classList.add("ghost"),0);
       });
-      handle.addEventListener("dragend",()=>ped.classList.remove("ghost"));
+      ped.addEventListener("dragend",()=>{
+        ped.classList.remove("ghost");
+        dragging={pid:null,fromId:null,el:null};
+      });
       zone.appendChild(ped);
     });
 
-    // Drop handlers en la columna
-    el.addEventListener("dragover",(e)=>{e.preventDefault();el.classList.add("over");});
-    el.addEventListener("dragleave",(e)=>{if(!el.contains(e.relatedTarget))el.classList.remove("over");});
-    el.addEventListener("drop",(e)=>{
-      e.preventDefault();el.classList.remove("over");
-      const raw=e.dataTransfer.getData("text/plain");
-      if(!raw)return;
-      const [pid,fromId]=raw.split("|");
-      if(!pid||fromId===r.ruta_id)return;
-      sendMove(pid,r.ruta_id);
+    // DROP EVENTS en toda la columna
+    el.addEventListener("dragover",(e)=>{
+      e.preventDefault();
+      e.dataTransfer.dropEffect="move";
+      el.classList.add("over");
     });
-    document.getElementById("panel").appendChild(el);
+    el.addEventListener("dragleave",(e)=>{
+      if(!el.contains(e.relatedTarget)) el.classList.remove("over");
+    });
+    el.addEventListener("drop",(e)=>{
+      e.preventDefault();
+      el.classList.remove("over");
+      const raw=e.dataTransfer.getData("text/plain");
+      if(!raw) return;
+      const parts=raw.split("|");
+      const pid=parts[0], fromId=parts[1];
+      if(!pid || fromId===r.ruta_id) return;
+      doMove(pid, r.ruta_id);
+    });
+
+    panel.appendChild(el);
   });
 }
 render();
 </script></body></html>"""
 
-    # APP_URL: obtener la URL base de la app
-    # Se usa para que el drag & drop pueda navegar al top-window con query params
-    app_url = ""
-
-    # Método 1: st.context (Streamlit ≥ 1.37)
-    try:
-        ctx = st.context
-        if hasattr(ctx, "headers"):
-            hdrs = ctx.headers
-            # "Host" es el dominio del servidor Streamlit
-            host = hdrs.get("Host") or hdrs.get("host") or ""
-            # "Referer" tiene la URL completa de donde viene la request
-            ref  = hdrs.get("Referer") or hdrs.get("referer") or ""
-            if ref:
-                from urllib.parse import urlparse
-                p = urlparse(ref)
-                if p.scheme and p.netloc:
-                    app_url = f"{p.scheme}://{p.netloc}{p.path or '/'}"
-            elif host:
-                # Sin referer, construir HTTPS con el host
-                app_url = f"https://{host}/"
-    except Exception:
-        pass
-
-    # Método 2: Runtime context interno (fallback)
-    if not app_url:
-        try:
-            from streamlit.runtime.scriptrunner import get_script_run_ctx
-            from streamlit.web.server.server import Server
-            ctx2 = get_script_run_ctx()
-            if ctx2:
-                # Intentar obtener la request del session info
-                for attr in ("request", "_client", "session_info"):
-                    req = getattr(ctx2, attr, None)
-                    if req and hasattr(req, "host"):
-                        host = req.host
-                        if host:
-                            app_url = f"https://{host}/"
-                            break
-        except Exception:
-            pass
-
     html = html.replace("__RUTAS_JSON__", rutas_json)
     html = html.replace("__APP_URL__", app_url)
     components.html(html, height=height, scrolling=True)
-
-    # La captura de query params se hace al inicio del main()
 
 
 def main():
@@ -1592,7 +1566,7 @@ def main():
     # ── PEDIDOS ───────────────────────────────────────────
     with tab_peds:
         st.subheader("Pedidos cargados")
-        st.dataframe(pedidos_df, use_container_width=True, hide_index=True)
+        st.dataframe(pedidos_df, hide_index=True)
         st.caption(f"{len(pedidos_df)} pedidos · {pedidos_df['kilos'].sum():,.0f} kg · ${pedidos_df['valor'].sum():,.0f}")
 
     # ── FLETES ────────────────────────────────────────────
